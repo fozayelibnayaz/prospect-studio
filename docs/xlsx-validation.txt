@@ -1,0 +1,1 @@
+PASS: valid OOXML workbook; both sheets open; formula-like data remains text; Unicode and XML escaping preserved.

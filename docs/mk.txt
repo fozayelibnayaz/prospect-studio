@@ -1,0 +1,30 @@
+
+Running 2 tests using 1 worker
+
+  ✘  1 tests/app.spec.js:150:1 › marketing: generate, edit, approve, post and record metrics (30.0s)
+  ✓  2 tests/app.spec.js:180:1 › customers: weekly digest builds and satisfaction is recorded (611ms)
+
+
+  1) tests/app.spec.js:150:1 › marketing: generate, edit, approve, post and record metrics ─────────
+
+    [31mTest timeout of 30000ms exceeded.[39m
+
+    Error: locator.fill: Test timeout of 30000ms exceeded.
+    Call log:
+    [2m  - waiting for getByRole('dialog').getByRole('textbox', { name: 'Post text' })[22m
+
+
+      158 |     .getByRole("dialog")
+      159 |     .getByRole("textbox", { name: "Post text" })
+    > 160 |     .fill("Edited fictional post for the test.");
+          |      ^
+      161 |   await page.getByRole("button", { name: "Save post" }).click();
+      162 |   await page.getByRole("button", { name: "Approve" }).first().click();
+      163 |   await page.getByRole("button", { name: "Mark posted" }).first().click();
+        at /home/user/prospect-studio/tests/app.spec.js:160:6
+
+    Error Context: test-results/app-marketing-generate-edit-approve-post-and-record-metrics/error-context.md
+
+  1 failed
+    tests/app.spec.js:150:1 › marketing: generate, edit, approve, post and record metrics ──────────
+  1 passed (33.8s)

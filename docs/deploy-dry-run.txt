@@ -1,0 +1,16 @@
+
+ ⛅️ wrangler 4.86.0 (update available 4.136.1)
+──────────────────────────────────────────────
+✨ Read 3 files from the assets directory /home/user/prospect-studio/public
+Total Upload: 96.78 KiB / gzip: 29.94 KiB
+Your Worker has access to the following bindings:
+Binding                                                                     Resource                  
+env.DB (prospect-studio)                                                    D1 Database               
+env.ASSETS                                                                  Assets                    
+env.DEMO_MODE ("false")                                                     Environment Variable      
+env.APP_ORIGIN ("REPLACE_WITH_YOUR_WORKERS_URL")                            Environment Variable      
+env.OWNER_EMAIL ("REPLACE_WITH_YOUR_GOOGLE_EMAIL")                          Environment Variable      
+env.TAVILY_PAYGO_DISABLED_CONFIRMED ("false")                               Environment Variable      
+env.AI_FREE_CONFIRMED ("false")                                             Environment Variable      
+
+--dry-run: exiting now.

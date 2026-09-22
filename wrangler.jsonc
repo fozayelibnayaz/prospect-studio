@@ -1,0 +1,38 @@
+{
+  "name": "ayaz-prospect-studio-preview",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-04-01",
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/unsubscribe"],
+  },
+  "vars": { "DEMO_MODE": "true" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "prospect-studio-local",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+    },
+  ],
+  "env": {
+    "production": {
+      "name": "ayaz-prospect-studio",
+      "vars": {
+        "DEMO_MODE": "false",
+        "APP_ORIGIN": "https://ayaz-prospect-studio.ayazwork2026.workers.dev",
+        "OWNER_EMAIL": "ayazwork2026@gmail.com",
+        "TAVILY_PAYGO_DISABLED_CONFIRMED": "true",
+        "AI_FREE_CONFIRMED": "true",
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "prospect-studio",
+          "database_id": "c2dd102d-85a9-4a6a-8363-43610342ad99",
+        },
+      ],
+      "triggers": { "crons": ["*/15 * * * *"] },
+    },
+  },
+}

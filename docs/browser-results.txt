@@ -1,0 +1,21 @@
+
+Running 16 tests using 1 worker
+
+  ✓   1 tests/app.spec.js:5:1 › dashboard clearly labels fictional demo and global rotation (503ms)
+  ✓   2 tests/app.spec.js:15:1 › all eight sections render (844ms)
+  ✓   3 tests/app.spec.js:31:1 › review modal shows evidence and no inferred consent (286ms)
+  ✓   4 tests/app.spec.js:43:1 › search does not execute HTML (183ms)
+  ✓   5 tests/app.spec.js:49:1 › mode changes persist and can restore broad (615ms)
+  ✓   6 tests/app.spec.js:58:1 › sending opt-in toggle requires confirmation and persists (468ms)
+  ✓   7 tests/app.spec.js:71:1 › draft creation does not send and approval without evidence rejects (505ms)
+  ✓   8 tests/app.spec.js:90:1 › daily snapshot exports genuine XLSX (395ms)
+  ✓   9 tests/app.spec.js:104:1 › mobile layout has no body overflow (329ms)
+  ✓  10 tests/app.spec.js:115:1 › held contact cannot create an outreach draft (428ms)
+  ✓  11 tests/app.spec.js:126:1 › task completion persists (534ms)
+  ✓  12 tests/app.spec.js:133:1 › review dialog supports Escape (281ms)
+  ✓  13 tests/app.spec.js:140:1 › accessibility audit of main views (4.8s)
+  ✓  14 tests/app.spec.js:150:1 › marketing: generate, edit, approve, post and record metrics (1.3s)
+  ✓  15 tests/app.spec.js:176:1 › finance: record a payment once and see it in collected totals (373ms)
+  ✓  16 tests/app.spec.js:185:1 › customers: weekly digest builds and satisfaction is recorded (507ms)
+
+  16 passed (14.0s)
