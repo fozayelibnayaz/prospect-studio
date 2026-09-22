@@ -324,3 +324,118 @@ test("business map covers the full A-to-Z lifecycle", () => {
   assert.ok(statuses.includes("NEEDS DATA"));
   assert.ok(businessMap.every((r) => r.stage && r.people && r.note));
 });
+
+import { parseTopics, contentFromConcept } from "../src/domain.js";
+
+test("parseTopics handles plain lines and ID: topic lines", () => {
+  assert.deepEqual(parseTopics({ contentTopics: "" }), []);
+  const t = parseTopics({
+    contentTopics:
+      "GA4 for clinics\nT2: WordPress maintenance plans\n\n   \nReporting dashboards",
+  });
+  assert.equal(t.length, 3);
+  assert.equal(t[0].id, null);
+  assert.equal(t[0].topic, "GA4 for clinics");
+  assert.equal(t[1].id, "T2");
+  assert.equal(t[1].topic, "WordPress maintenance plans");
+  assert.equal(t[2].topic, "Reporting dashboards");
+});
+
+test("generateContent honors owner topics and quantity, deterministically", () => {
+  const s = {
+    ...baseSettings,
+    contentTopics: "Alpha: enquiries\nBeta: dashboards\nGamma: automation",
+    contentCount: 4,
+  };
+  const a = generateContent("2026-09-22", s, { leads: [], campaigns: [] });
+  const b = generateContent("2026-09-22", s, { leads: [], campaigns: [] });
+  assert.deepEqual(a, b);
+  assert.equal(a.length, 4);
+  assert.equal(new Set(a.map((x) => x.id)).size, 4);
+  assert.equal(new Set(a.map((x) => x.topic)).size, 3);
+  for (const c of a) {
+    assert.equal(c.status, "DRAFT");
+    assert.equal(c.source, "autopilot");
+    assert.ok(c.body.length > 100);
+  }
+});
+
+test("concept writer embeds concept, skill and portfolio without invented claims", () => {
+  const body = contentFromConcept(
+    "Why clinics lose after-hours enquiries",
+    baseSettings,
+    "LinkedIn post",
+  );
+  assert.match(body, /Why clinics lose after-hours enquiries/);
+  assert.match(body, /ga4 \/ gtm \/ reporting|wordpress \/ php \/ acf/i);
+  assert.match(body, /Portfolio: https:\/\/fozayelibnayaz\.github\.io\/portfolio\//);
+  const x = contentFromConcept("Same topic", baseSettings, "X post");
+  assert.ok(!x.includes("Portfolio:"));
+});
+
+test("autopilot settings validate ranges and types", () => {
+  const s = validSettings(
+    {
+      contentCount: 5,
+      contentTopics: "A: one\nB: two",
+      contentAi: true,
+      autoReplyWatch: false,
+    },
+    defaults,
+  );
+  assert.equal(s.contentCount, 5);
+  assert.equal(s.contentTopics, "A: one\nB: two");
+  assert.equal(s.contentAi, true);
+  assert.equal(s.autoReplyWatch, false);
+  assert.throws(() => validSettings({ contentCount: 0 }, defaults));
+  assert.throws(() => validSettings({ contentCount: 11 }, defaults));
+  assert.throws(() =>
+    validSettings({ contentTopics: "x".repeat(1201) }, defaults),
+  );
+  assert.throws(() => validSettings({ contentAi: "yes" }, defaults));
+});
+
+import { makeFollowup } from "../src/domain.js";
+
+test("follow-up copy is honest, threaded and stops on request", () => {
+  const lead = { id: "l1", company: "Northline", niche: "Website & WordPress" };
+  const f = makeFollowup(lead, baseSettings, 4, "Would website support be relevant?");
+  assert.equal(f.kind, "followup");
+  assert.match(f.subject, /^Re: Would website support/);
+  assert.equal(f.status, "DRAFT");
+  assert.equal(f.approvedAt, null);
+  assert.match(f.body, /wrote 4 days ago/);
+  assert.match(f.body, /will close the file for good/);
+  assert.match(f.body, /Portfolio: https:\/\/fozayelibnayaz\.github\.io\/portfolio\//);
+  assert.ok(
+    !/\d+%|guarantee|guaranteed|clients? (got|increased)|\d+ (leads|customers|sales)/i.test(
+      f.body,
+    ),
+  );
+  const again = makeFollowup(lead, baseSettings, 4, "Re: already threaded");
+  assert.equal(again.subject, "Re: already threaded");
+});
+
+test("follow-up settings validate ranges and types", () => {
+  const s = validSettings({ followUpOn: false, followUpDays: 7, followUpMax: 2 }, defaults);
+  assert.equal(s.followUpOn, false);
+  assert.equal(s.followUpDays, 7);
+  assert.equal(s.followUpMax, 2);
+  assert.throws(() => validSettings({ followUpDays: 1 }, defaults));
+  assert.throws(() => validSettings({ followUpDays: 15 }, defaults));
+  assert.throws(() => validSettings({ followUpMax: 3 }, defaults));
+  assert.throws(() => validSettings({ followUpOn: "yes" }, defaults));
+});
+
+test("multi-sheet xlsx export produces a real workbook", async () => {
+  const { xlsxBook } = await import("../src/xlsx.js");
+  const buf = xlsxBook([
+    { name: "Sent", header: ["When", "Business"], rows: [["2026-09-22", "Northline"]] },
+    { name: "Received", header: ["When", "From"], rows: [["2026-09-22", "test@example.com"]] },
+  ]);
+  assert.ok(buf instanceof Uint8Array || buf instanceof ArrayBuffer);
+  const bytes = new Uint8Array(buf);
+  assert.equal(bytes[0], 0x50);
+  assert.equal(bytes[1], 0x4b);
+  assert.ok(bytes.length > 500);
+});

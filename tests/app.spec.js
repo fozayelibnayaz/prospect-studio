@@ -12,15 +12,18 @@ test("dashboard clearly labels fictional demo and global rotation", async ({
   await expect(page.getByText("249 markets", { exact: true })).toBeVisible();
   await page.screenshot({ path: "docs/desktop.png", fullPage: true });
 });
-test("all eight sections render", async ({ page }) => {
+test("all sections render", async ({ page }) => {
   await page.goto("/");
   for (const name of [
     "Prospects",
     "Review & send",
+    "Email activity",
     "Sales pipeline",
     "Customers",
+    "Marketing",
     "Work & follow-ups",
     "Reports & learning",
+    "Automation",
     "Settings",
     "Overview",
   ]) {
@@ -43,8 +46,9 @@ test("review modal shows evidence and no inferred consent", async ({
 test("search does not execute HTML", async ({ page }) => {
   await page.goto("/#prospects");
   await page.getByRole("searchbox").fill("<img src=x onerror=alert(1)>");
-  await expect(page.getByText("No matching prospects yet")).toBeVisible();
-  await expect(page.locator("img")).toHaveCount(0);
+    await expect(page.getByText("No matching prospects yet")).toBeVisible();
+    // Content area must not contain injected elements (sidebar brand image is expected chrome).
+    await expect(page.locator(".main img")).toHaveCount(0);
 });
 test("mode changes persist and can restore broad", async ({ page }) => {
   await page.goto("/");
@@ -139,7 +143,16 @@ test("review dialog supports Escape", async ({ page }) => {
 });
 test("accessibility audit of main views", async ({ page }) => {
   const { default: AxeBuilder } = await import("@axe-core/playwright");
-  for (const v of ["overview", "prospects", "review", "settings", "reports"]) {
+  for (const v of [
+    "overview",
+    "prospects",
+    "review",
+    "mail",
+    "settings",
+    "reports",
+    "automation",
+    "marketing",
+  ]) {
     await page.goto("/#" + v);
     await expect(page.locator("h1")).toBeVisible();
     const scan = await new AxeBuilder({ page }).analyze();
@@ -147,31 +160,97 @@ test("accessibility audit of main views", async ({ page }) => {
   }
 });
 
+test("email activity lists sent messages with full text", async ({ page }) => {
+  await page.goto("/#mail");
+  await expect(
+    page.getByRole("heading", { name: "Email activity" }),
+  ).toBeVisible();
+  await expect(page.getByText("→ SENT").first()).toBeVisible();
+  await page
+    .getByRole("row")
+    .filter({ hasText: "→ SENT" })
+    .first()
+    .click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.locator(".mail-body")).not.toBeEmpty();
+  await page.getByRole("button", { name: "Close dialog" }).click();
+});
+
+test("automation view shows every worker with status and quick actions", async ({
+  page,
+}) => {
+  await page.goto("/#automation");
+  for (const name of [
+    "Discovery",
+    "Outreach sending",
+    "Reply watch",
+    "Daily content",
+    "Reports & digest",
+    "AI assist",
+    "Compliance guards",
+  ])
+    await expect(
+      page.getByText(name, { exact: true }),
+    ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Process one eligible message" }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sync now" })).toBeVisible();
+});
+
+test("marketing: write a concept draft, then update it", async ({ page }) => {
+  await page.goto("/#marketing");
+  await expect(page.getByText("Content autopilot", { exact: true })).toBeVisible();
+  await page.locator("#conceptBox").fill("Why local clinics lose enquiries at 8pm");
+  await page.getByRole("button", { name: "Write draft from concept" }).click();
+  await expect(page.getByText("from your concept").first()).toBeVisible();
+  await page.getByRole("button", { name: "Update", exact: true }).first().click();
+  await page.getByRole("textbox", { name: "New instructions" }).fill("Mention a shared dashboard");
+  await page.getByRole("button", { name: "Rewrite post" }).click();
+  await expect(page.locator("#toast")).toContainText("back in DRAFT");
+});
+
+test("overview shows what needs the owner's attention", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByText("NEEDS YOUR EYES:")).toBeVisible();
+});
+
 test("marketing: generate, edit, approve, post and record metrics", async ({
   page,
 }) => {
   await page.goto("/#marketing");
   await page.getByRole("button", { name: /Generate today’s content/ }).click();
-  const draft = page.getByRole("button", { name: "Edit" }).first();
-  await draft.click();
+  const row = page
+    .locator(".connected")
+    .filter({
+      has: page.getByRole("button", { name: "Approve", exact: true }),
+    })
+    .first();
+  const id = await row
+    .getByRole("button", { name: "Edit", exact: true })
+    .getAttribute("data-editcontent");
+  await row.getByRole("button", { name: "Edit", exact: true }).click();
   await page
     .getByRole("dialog")
     .getByRole("textbox", { name: "Post text" })
     .fill("Edited fictional post for the test.");
   await page.getByRole("button", { name: "Save post" }).click();
-  await page.getByRole("button", { name: "Approve" }).first().click();
-  await page.getByRole("button", { name: "Mark posted" }).first().click();
+  await row.getByRole("button", { name: "Approve", exact: true }).click();
+  await row.getByRole("button", { name: "Mark posted", exact: true }).click();
   await expect(page.getByText("POSTED", { exact: true }).first()).toBeVisible();
-  const reach = page.locator("[data-metric-reach]").first();
+  const reach = page.locator(`[data-metric-reach="${id}"]`);
   await reach.fill("250");
   await Promise.all([
     page.waitForResponse(
       (r) => r.url().includes("/api/action") && r.request().method() === "POST",
     ),
-    page.getByRole("button", { name: "Save metrics" }).first().click(),
+    page
+      .locator(`.connected:has([data-metric-reach="${id}"])`)
+      .getByRole("button", { name: "Save metrics" })
+      .click(),
   ]);
   await page.reload();
-  await expect(reach.first()).toHaveValue("250");
+  await expect(page.locator(`[data-metric-reach="${id}"]`)).toHaveValue("250");
 });
 test("finance: record a payment once and see it in collected totals", async ({
   page,
@@ -190,4 +269,35 @@ test("customers: weekly digest builds and satisfaction is recorded", async ({
   await expect(page.getByText(/Weekly digest — week of/)).toBeVisible();
   await page.getByRole("button", { name: "4" }).first().click();
   await expect(page.getByText("4/5 recorded").first()).toBeVisible();
+});
+
+test("automation: follow-up settings round-trip and run-now toast", async ({
+  page,
+}) => {
+  await page.goto("/#automation");
+  await expect(page.getByText("Follow-up autopilot", { exact: true }).first()).toBeVisible();
+  await page.locator("#followUpDays").fill("6");
+  await page.locator("#followUpMax").fill("2");
+  await page.getByRole("button", { name: "Save follow-up settings" }).click();
+  await expect(page.locator("#toast")).toContainText("Follow-up settings saved");
+  await page.reload();
+  await expect(page.locator("#followUpDays")).toHaveValue("6");
+  await expect(page.locator("#followUpMax")).toHaveValue("2");
+  await page.getByRole("button", { name: "Run follow-ups now" }).click();
+  await expect(page.locator("#toast")).toContainText(/follow-up draft|quiet conversations|off/i);
+  await page.screenshot({ path: "docs/automation.png", fullPage: true });
+});
+
+test("reports: export buttons download real files", async ({ page }) => {
+  await page.goto("/#reports");
+  const [x] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Email activity XLSX" }).click(),
+  ]);
+  expect(x.suggestedFilename()).toMatch(/Email-Activity-.*\.xlsx/);
+  const [b] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Full backup JSON" }).click(),
+  ]);
+  expect(b.suggestedFilename()).toMatch(/Backup-.*\.json/);
 });

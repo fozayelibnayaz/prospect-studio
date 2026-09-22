@@ -308,7 +308,7 @@ export function generateContent(dateISO, settings, ctx) {
         source: "autopilot",
         campaignId: (ctx.campaigns || []).find((c) => c.status === "ACTIVE")?.id || null,
         metrics: { reach: 0, likes: 0, comments: 0 },
-        createdAt: new Date().toISOString(),
+        createdAt: dateISO + "T00:00:00.000Z",
       });
     }
     const win = (ctx.leads || []).find(
@@ -326,7 +326,7 @@ export function generateContent(dateISO, settings, ctx) {
         source: "autopilot",
         campaignId: (ctx.campaigns || []).find((c) => c.status === "ACTIVE")?.id || null,
         metrics: { reach: 0, likes: 0, comments: 0 },
-        createdAt: new Date().toISOString(),
+        createdAt: dateISO + "T00:00:00.000Z",
       });
     return items;
   }
@@ -350,7 +350,7 @@ Portfolio: ${settings.portfolio}`,
       niche: hook.niche,
       campaignId: campaign?.id || null,
       metrics: { reach: 0, likes: 0, comments: 0 },
-      createdAt: new Date().toISOString(),
+      createdAt: dateISO + "T00:00:00.000Z",
     },
     {
       id: `content-${dateISO}-2`,
@@ -364,7 +364,7 @@ We help ${settings.focusCountries.length ? "selected markets" : "independent bus
       niche: hook.niche,
       campaignId: campaign?.id || null,
       metrics: { reach: 0, likes: 0, comments: 0 },
-      createdAt: new Date().toISOString(),
+      createdAt: dateISO + "T00:00:00.000Z",
     },
   ];
   if (day % 7 === 3) {
@@ -380,7 +380,7 @@ ${settings.ownerName} · ${skill}`,
       niche: settings.niche,
       campaignId: campaign?.id || null,
       metrics: { reach: 0, likes: 0, comments: 0 },
-      createdAt: new Date().toISOString(),
+      createdAt: dateISO + "T00:00:00.000Z",
     });
   }
   if (win) {
@@ -398,7 +398,7 @@ ${settings.ownerName} · ${skill}`,
       niche: win.niche,
       campaignId: campaign?.id || null,
       metrics: { reach: 0, likes: 0, comments: 0 },
-      createdAt: new Date().toISOString(),
+      createdAt: dateISO + "T00:00:00.000Z",
     });
   }
   return items;
