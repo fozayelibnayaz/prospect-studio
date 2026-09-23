@@ -846,3 +846,191 @@ test("weekly digest emails the owner and never consumes send budget", async () =
     await h.mf.dispose();
   }
 });
+
+const backupFixture = {
+  app: "Prospect Studio",
+  version: "0.4.2",
+  exportedAt: "2026-09-22T00:00:00.000Z",
+  objects: {
+    leads: [
+      { id: "r1", company: "Restored Co", email: "restored@example.com", status: "APPROVED", stage: "NEW" },
+      { id: "l1", company: "Overwrite Me", email: "test@example.com", status: "HOLD", stage: "NEW" },
+    ],
+    suppression: [{ id: "abc123", at: "2026-01-01T00:00:00.000Z" }],
+    credentials: [{ id: "gmail", encrypted: "MUST-NOT-BE-RESTORED" }],
+    somethingElse: [{ id: "x1" }],
+  },
+};
+
+test("restore: dry run writes nothing and reports counts", async () => {
+  const h = await setup();
+  try {
+    await h.put("leads", "l1", { id: "l1", company: "Existing", email: "e@example.com" });
+    const r = await h.action({ action: "restore", dryRun: true, mode: "add", backup: backupFixture });
+    assert.equal(r.status, 200, JSON.stringify(r));
+    assert.equal(r.body.written, 0);
+    assert.equal(r.body.summary.leads.new, 1);
+    assert.equal(r.body.summary.leads.skipped, 1);
+    assert.equal(r.body.summary.credentials.skipped, "not restorable");
+    assert.equal(r.body.summary.somethingElse.skipped, "not restorable");
+    assert.equal((await h.get("leads", "r1")), null);
+    assert.equal((await h.get("leads", "l1")).company, "Existing");
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("restore: add mode keeps existing records, update mode replaces them", async () => {
+  const h = await setup();
+  try {
+    await h.put("leads", "l1", { id: "l1", company: "Existing", email: "e@example.com" });
+    let r = await h.action({ action: "restore", mode: "add", backup: backupFixture });
+    assert.equal(r.status, 200, JSON.stringify(r));
+    assert.equal(r.body.written, 2, "one new lead + suppression");
+    assert.equal((await h.get("leads", "r1")).company, "Restored Co");
+    assert.equal((await h.get("leads", "l1")).company, "Existing");
+    assert.ok(await h.get("suppression", "abc123"));
+    assert.equal(await h.get("credentials", "gmail"), null);
+    r = await h.action({ action: "restore", mode: "update", backup: backupFixture });
+    assert.equal(r.status, 200, JSON.stringify(r));
+    assert.equal((await h.get("leads", "l1")).company, "Overwrite Me");
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("restore: rejects foreign files and bad modes", async () => {
+  const h = await setup();
+  try {
+    let r = await h.action({ action: "restore", backup: { app: "Something Else", objects: {} } });
+    assert.equal(r.status, 400);
+    r = await h.action({ action: "restore", backup: { app: "Prospect Studio", objects: {} }, mode: "replace" });
+    assert.equal(r.status, 400);
+    r = await h.action({ action: "restore", mode: "add" });
+    assert.equal(r.status, 400);
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("restore: a snapshot without row detail fails clearly instead of crashing", async () => {
+  const h = await setup();
+  try {
+    await h.put("reports", "2026-09-20", { id: "2026-09-20", at: "2026-09-21T00:00:00.000Z", counts: { total: 3, held: 0 }, target: 50 });
+    const r = await h.mf.dispatchFetch(origin + "/api/reports/2026-09-20.xlsx", {
+      headers: { Cookie: "ps_session=" + session },
+    });
+    assert.equal(r.status, 400);
+    assert.match((await r.json()).error, /no stored row detail/i);
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+async function overdueFixture(h, { status = "OVERDUE", days = 5, leadOverrides = {} } = {}) {
+  await mailFixture(h);
+  const dueAt = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const l = await h.get("leads", "l1");
+  await h.put("leads", "l1", { ...l, stage: "WON", replyAt: new Date().toISOString(), ...leadOverrides });
+  await h.put("invoices", "inv1", {
+    id: "inv1",
+    leadId: "l1",
+    amount: 15000,
+    currency: "USD",
+    dueAt,
+    status,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+test("invoice reminders: one polite draft for an overdue invoice, then none", async () => {
+  const h = await setup();
+  try {
+    await overdueFixture(h);
+    let r = await h.action({ action: "invoiceReminders" });
+    assert.equal(r.status, 200, JSON.stringify(r));
+    assert.equal(r.body.created, 1);
+    const d = await h.db.prepare("SELECT id,data FROM objects WHERE kind='drafts'").all();
+    const rem = d.results.map((x) => JSON.parse(x.data)).find((x) => x.kind === "invoice-reminder");
+    assert.ok(rem);
+    assert.equal(rem.status, "DRAFT");
+    assert.equal(rem.invoiceId, "inv1");
+    assert.ok(await h.get("tasks", "invtask-" + rem.id));
+    r = await h.action({ action: "invoiceReminders" });
+    assert.equal(r.body.created, 0, "no duplicate while one is pending");
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("invoice reminders: skipped when paid, not due, suppressed, on hold or capped", async () => {
+  for (const [name, opts] of [
+    ["paid", { status: "PAID" }],
+    ["not due", { days: -3 }],
+    ["suppressed", { leadOverrides: { suppressed: true } }],
+    ["on hold", { leadOverrides: { status: "HOLD" } }],
+  ]) {
+    const h = await setup();
+    try {
+      await overdueFixture(h, opts);
+      const r = await h.action({ action: "invoiceReminders" });
+      assert.equal(r.body.created, 0, name);
+    } finally {
+      await h.mf.dispose();
+    }
+  }
+  const h = await setup();
+  try {
+    await overdueFixture(h);
+    await h.action({ action: "invoiceReminders" });
+    const all = (await h.db.prepare("SELECT id,data FROM objects WHERE kind='drafts'").all()).results.map((x) => JSON.parse(x.data));
+    const rem = all.find((x) => x.kind === "invoice-reminder");
+    await h.put("drafts", rem.id, { ...rem, status: "SENT", sentAt: new Date(Date.now() - 8 * 86400000).toISOString() });
+    await h.put("invoices", "inv1", { ...(await h.get("invoices", "inv1")), reminderSentAt: new Date(Date.now() - 8 * 86400000).toISOString() });
+    assert.equal((await h.action({ action: "invoiceReminders" })).body.created, 1, "second reminder allowed");
+    const all2 = (await h.db.prepare("SELECT id,data FROM objects WHERE kind='drafts'").all()).results.map((x) => JSON.parse(x.data));
+    for (const d of all2.filter((x) => x.kind === "invoice-reminder"))
+      await h.put("drafts", d.id, { ...d, status: "SENT", sentAt: new Date().toISOString() });
+    await h.put("invoices", "inv1", { ...(await h.get("invoices", "inv1")), reminderSentAt: new Date(Date.now() - 8 * 86400000).toISOString() });
+    assert.equal((await h.action({ action: "invoiceReminders" })).body.created, 0, "two-reminder cap holds");
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("sending a reminder stamps the invoice", async () => {
+  const h = await setup();
+  try {
+    await overdueFixture(h);
+    await h.action({ action: "invoiceReminders" });
+    const drafts = (await h.db.prepare("SELECT id,data FROM objects WHERE kind='drafts'").all()).results.map((x) => JSON.parse(x.data));
+    const rem = drafts.find((x) => x.kind === "invoice-reminder");
+    await h.action({ action: "approve", id: rem.id });
+    const r = await h.action({ action: "send" });
+    assert.equal(r.status, 200, JSON.stringify(r));
+    const inv = await h.get("invoices", "inv1");
+    assert.ok(inv.reminderSentAt, "invoice stamped when reminder sends");
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("pause window blocks sending, follow-ups and reminders but not discovery", async () => {
+  const h = await setup();
+  try {
+    await quietFixture(h);
+    const today = new Date().toISOString().slice(0, 10);
+    await h.action({ action: "settings", value: { pauseWindows: `${today}..${today}` } });
+    const send = await h.action({ action: "send" });
+    assert.equal(send.body.status, "PAUSED_WINDOW");
+    const fu = await h.action({ action: "followup" });
+    assert.equal(fu.body.skipped, "PAUSE_WINDOW");
+    const rem = await h.action({ action: "invoiceReminders" });
+    assert.equal(rem.body.skipped, "PAUSE_WINDOW");
+    const before = h.calls.length;
+    const disc = await h.action({ action: "discover" });
+    assert.equal(disc.status, 200, "discovery still runs during a pause window");
+  } finally {
+    await h.mf.dispose();
+  }
+});

@@ -13,6 +13,8 @@ import {
   generateContent,
   contentFromConcept,
   makeFollowup,
+  makeInvoiceReminder,
+  inPauseWindow,
   checkinPlan,
   marketingIdeas,
   businessMap,
@@ -569,6 +571,9 @@ async function discover(e, manual = false) {
 async function sendOne(e) {
   const s = await settings(e);
   if (s.paused) return { status: "PAUSED", sent: 0 };
+  const win = inPauseWindow(s, day());
+  if (win)
+    return { status: "PAUSED_WINDOW", window: win, sent: 0 };
   const drafts = await list(e, "drafts"),
     leads = await list(e, "leads");
   for (const stale of drafts.filter(
@@ -659,6 +664,13 @@ async function sendOne(e) {
     l.lastContactAt = d.sentAt;
     l.stage = l.stage === "NEW" ? "CONTACTED" : l.stage;
     await saveLead(e, l);
+    if (d.invoiceId) {
+      const inv = await get(e, "invoices", d.invoiceId);
+      if (inv) {
+        inv.reminderSentAt = d.sentAt;
+        await put(e, "invoices", inv.id, inv);
+      }
+    }
     await put(e, "tasks", "followup-" + d.id, {
       id: "followup-" + d.id,
       title: "Review reply / next step — " + l.company,
@@ -842,6 +854,8 @@ async function mailOwner(e, subject, text) {
 async function followupDrafts(e) {
   const s = await settings(e);
   if (s.followUpOn === false) return { skipped: "FOLLOW_UP_OFF", created: 0 };
+  const win = inPauseWindow(s, day());
+  if (win) return { skipped: "PAUSE_WINDOW", window: win, created: 0 };
   const drafts = await list(e, "drafts"),
     leads = await list(e, "leads");
   const days = Math.max(2, Math.min(14, Number(s.followUpDays) || 4));
@@ -868,7 +882,7 @@ async function followupDrafts(e) {
     );
     if (!(lastSent < quietBefore)) continue;
     const original = sent.find((d) => d.kind !== "followup") || sent[0];
-    const f = makeFollowup(l, s, days, original.subject);
+    const f = makeFollowup(l, s, days, original.subject, touches + 1);
     f.id = "fu-" + l.id + "-" + (touches + 1) + "-" + id().slice(0, 6);
     await put(e, "drafts", f.id, f);
     await put(e, "tasks", "followupdraft-" + f.id, {
@@ -888,6 +902,152 @@ async function followupDrafts(e) {
       `${created.length} follow-up draft(s) created for quiet conversations (review before send; max ${maxTouches} extra touch(es)).`,
     );
   return { created: created.length, ids: created };
+}
+async function invoiceReminders(e, onlyId = null) {
+  const s = await settings(e);
+  // The autopilot switch and pause windows govern the automatic sweep only.
+  // An explicit owner click on one invoice still drafts (never sends) for review.
+  if (!onlyId) {
+    if (s.invoiceRemindersOn === false)
+      return { skipped: "INVOICE_REMINDERS_OFF", created: 0 };
+    const win = inPauseWindow(s, day());
+    if (win) return { skipped: "PAUSE_WINDOW", window: win, created: 0 };
+  }
+  const invoices = await list(e, "invoices"),
+    leads = await list(e, "leads"),
+    drafts = await list(e, "drafts");
+  const today = day();
+  const created = [];
+  for (const inv of invoices) {
+    if (onlyId && inv.id !== onlyId) continue;
+    if (inv.status === "PAID" || !inv.dueAt || inv.dueAt >= today) continue;
+    const l = leads.find((x) => x.id === inv.leadId);
+    if (!l || l.suppressed || l.status === "HOLD") continue;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(l.email || "")) continue;
+    if (
+      inv.reminderSentAt &&
+      Date.now() - Date.parse(inv.reminderSentAt) < 7 * 86400000
+    )
+      continue;
+    const forInvoice = drafts.filter((d) => d.invoiceId === inv.id);
+    if (
+      forInvoice.some((d) =>
+        ["DRAFT", "APPROVED", "SENDING", "UNKNOWN"].includes(d.status),
+      )
+    )
+      continue;
+    if (forInvoice.filter((d) => d.status === "SENT").length >= 2) continue;
+    const d = makeInvoiceReminder(l, inv, s);
+    d.id = "invrem-" + inv.id + "-" + id().slice(0, 6);
+    await put(e, "drafts", d.id, d);
+    await put(e, "tasks", "invtask-" + d.id, {
+      id: "invtask-" + d.id,
+      title: "Review invoice reminder — " + l.company,
+      leadId: l.id,
+      type: "FOLLOW_UP",
+      due: today,
+      status: "OPEN",
+    });
+    created.push(d.id);
+  }
+  if (created.length)
+    await log(
+      e,
+      "INVOICE_REMINDER",
+      `${created.length} invoice reminder draft(s) created for overdue invoices (review before send, max 2 per invoice).`,
+    );
+  return { created: created.length, ids: created };
+}
+const RESTORE_KINDS = [
+  "settings",
+  "leads",
+  "drafts",
+  "mail",
+  "tasks",
+  "content",
+  "campaigns",
+  "invoices",
+  "digests",
+  "suggestions",
+  "events",
+  "unsubscribe",
+  "suppression",
+  "sends",
+];
+async function restoreBackup(e, backup, mode, dryRun) {
+  if (
+    !backup ||
+    typeof backup !== "object" ||
+    backup.app !== "Prospect Studio" ||
+    !backup.objects ||
+    typeof backup.objects !== "object"
+  )
+    throw Error("Not a Prospect Studio backup file");
+  if (
+    !["add", "update"].includes(mode)
+  )
+    throw Error("Restore mode must be add or update");
+  const summary = {};
+  const writes = [];
+  let total = 0;
+  for (const [kind, rows] of Object.entries(backup.objects)) {
+    if (!RESTORE_KINDS.includes(kind)) {
+      summary[kind] = { skipped: "not restorable" };
+      continue;
+    }
+    if (!Array.isArray(rows)) {
+      summary[kind] = { skipped: "not a list" };
+      continue;
+    }
+    if (rows.length > 20000) throw Error("Too many records in " + kind);
+    const ids = new Set((await list(e, kind)).map((x) => x?.id));
+    let added = 0,
+      updated = 0,
+      skipped = 0;
+    for (const rec of rows) {
+      if (!rec || typeof rec !== "object" || !rec.id) {
+        skipped++;
+        continue;
+      }
+      const data = JSON.stringify(rec);
+      if (data.length > 20000) {
+        skipped++;
+        continue;
+      }
+      const exists = ids.has(rec.id);
+      if (exists && mode === "add") {
+        skipped++;
+        continue;
+      }
+      if (exists) updated++;
+      else {
+        added++;
+        ids.add(rec.id);
+      }
+      if (!dryRun) writes.push({ kind, id: String(rec.id), data });
+    }
+    total += added + updated;
+    summary[kind] = { new: added, updated, skipped };
+  }
+  if (total > 50000) throw Error("Backup contains too many records");
+  if (!dryRun && writes.length) {
+    const stmt = e.DB.prepare(
+      "INSERT INTO objects(kind,id,data) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data,version=objects.version+1",
+    );
+    for (let i = 0; i < writes.length; i += 50)
+      await e.DB.batch(
+        writes
+          .slice(i, i + 50)
+          .map((w) => stmt.bind(w.kind, w.id, w.data)),
+      );
+  }
+  if (!dryRun)
+    await log(
+      e,
+      "RESTORE",
+      `Backup restored (mode ${mode}): ${writes.length} record(s) written. Credentials are never restored; reconnect Gmail if needed.`,
+    );
+  return { dryRun, mode, total, written: dryRun ? 0 : writes.length, summary };
 }
 async function report(e, previous = false) {
   const d = previous
@@ -1158,6 +1318,16 @@ async function seed(e) {
     note: "Fictional demo invoice",
     createdAt: now(),
   });
+  await put(e, "invoices", "demo-invoice-overdue", {
+    id: "demo-invoice-overdue",
+    leadId: "demo-2",
+    amount: 4200,
+    currency: "USD",
+    dueAt: new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10),
+    status: "OVERDUE",
+    note: "Fictional demo invoice (overdue)",
+    createdAt: now(),
+  });
   for (const c of checkinPlan)
     await put(e, "tasks", "checkin-demo-3-" + c.offset, {
       id: "checkin-demo-3-" + c.offset,
@@ -1322,6 +1492,13 @@ async function action(e, body) {
       return syncReplies(e);
     case "followup":
       return followupDrafts(e);
+    case "invoiceReminders":
+      return invoiceReminders(e);
+    case "invoiceReminder":
+      if (!body.id) throw Error("Invoice id required");
+      return invoiceReminders(e, body.id);
+    case "restore":
+      return restoreBackup(e, body.backup, body.mode || "add", !!body.dryRun);
     case "ai":
       return suggestions(e);
     case "snapshot":
@@ -2032,6 +2209,14 @@ async function handle(r, e) {
     );
     const report = await get(e, "reports", d);
     if (!report) return json({ error: "Report not found" }, 404);
+    if (!Array.isArray(report.rows))
+      return json(
+        {
+          error:
+            "This snapshot has no stored row detail (it was restored from a backup). Create a new snapshot for full downloads.",
+        },
+        400,
+      );
     return new Response(xlsx(report), {
       headers: {
         "Content-Type":
@@ -2134,11 +2319,14 @@ async function handle(r, e) {
   if (r.method !== "POST") return json({ error: "Not found" }, 404);
   if (!demo(e) && r.headers.get("Origin") !== e.APP_ORIGIN)
     return json({ error: "ORIGIN_REJECTED" }, 403);
-  if (Number(r.headers.get("Content-Length") || 0) > 300000)
+  if (Number(r.headers.get("Content-Length") || 0) > 6000000)
     return json({ error: "Body too large" }, 413);
   const text = await r.text();
-  if (text.length > 300000) return json({ error: "Body too large" }, 413);
+  if (text.length > 6000000) return json({ error: "Body too large" }, 413);
   const body = JSON.parse(text);
+  // Only a backup restore may use the larger allowance.
+  if (body.action !== "restore" && text.length > 300000)
+    return json({ error: "Body too large" }, 413);
   if (body.action === "logout") {
     const sid = cookie(r, "ps_session");
     if (sid)
@@ -2190,7 +2378,12 @@ export default {
         try {
           const s = await settings(e);
           if (s.paused) return;
-          for (const task of [() => discover(e), () => sendOne(e), () => followupDrafts(e)]) {
+          for (const task of [
+            () => discover(e),
+            () => sendOne(e),
+            () => followupDrafts(e),
+            () => invoiceReminders(e),
+          ]) {
             try {
               await task();
             } catch (err) {

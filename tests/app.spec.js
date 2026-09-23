@@ -257,8 +257,9 @@ test("finance: record a payment once and see it in collected totals", async ({
 }) => {
   await page.goto("/#finance");
   page.on("dialog", (d) => d.accept());
-  await page.getByRole("button", { name: "Record payment" }).first().click();
-  await expect(page.getByText("PAID", { exact: true }).first()).toBeVisible();
+  const row = page.getByRole("row").filter({ hasText: "Mira Consulting" });
+  await row.getByRole("button", { name: "Record payment" }).click();
+  await expect(row.getByText("PAID", { exact: true })).toBeVisible();
   await expect(page.locator(".stat-value").first()).toContainText("15,000");
 });
 test("customers: weekly digest builds and satisfaction is recorded", async ({
@@ -300,4 +301,49 @@ test("reports: export buttons download real files", async ({ page }) => {
     page.getByRole("button", { name: "Full backup JSON" }).click(),
   ]);
   expect(b.suggestedFilename()).toMatch(/Backup-.*\.json/);
+});
+
+test("reports: restore preview reads a backup file without writing", async ({ page }) => {
+  await page.goto("/#reports");
+  await expect(
+    page.getByRole("heading", { name: "Restore from backup" }),
+  ).toBeVisible();
+  const backup = {
+    app: "Prospect Studio",
+    version: "0.4.2",
+    objects: { leads: [{ id: "demo-1", company: "Replaced Name" }] },
+  };
+  await page.setInputFiles("#restoreFile", {
+    name: "backup.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(backup)),
+  });
+  await page.getByRole("button", { name: "Preview restore" }).click();
+  await expect(page.locator("#restoreResult")).toContainText("Nothing has changed yet");
+  await expect(page.locator("#restoreResult")).toContainText("leads");
+});
+
+test("automation: pause window and invoice reminder settings save", async ({ page }) => {
+  await page.goto("/#automation");
+  await expect(page.getByText("Invoice reminders", { exact: true }).first()).toBeVisible();
+  await page.locator("#pauseWindows").fill("2026-12-20..2027-01-03");
+  await page.locator("#invoiceRemindersT").uncheck();
+  await page.getByRole("button", { name: "Save follow-up settings" }).click();
+  await expect(page.locator("#toast")).toContainText("Follow-up settings saved");
+  await page.reload();
+  await expect(page.locator("#pauseWindows")).toHaveValue("2026-12-20..2027-01-03");
+  await expect(page.locator("#invoiceRemindersT")).not.toBeChecked();
+  await page.getByRole("button", { name: "Draft reminders now" }).click();
+  await expect(page.locator("#toast")).toContainText(/off|reminder draft|overdue invoice/i);
+});
+
+test("finance: an overdue invoice drafts a tagged reminder", async ({ page }) => {
+  await page.goto("/#finance");
+  const row = page.getByRole("row").filter({ hasText: "Harbour & Pine" });
+  await expect(row).toBeVisible();
+  await row.getByRole("button", { name: "Reminder draft" }).click();
+  await expect(page.locator("#toast")).toContainText(/Reminder draft created|Nothing to draft/i);
+  await page.goto("/#review");
+  await expect(page.getByText("INVOICE", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(/Invoice reminder — 4,200 USD/).first()).toBeVisible();
 });

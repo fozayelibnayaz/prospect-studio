@@ -439,3 +439,60 @@ test("multi-sheet xlsx export produces a real workbook", async () => {
   assert.equal(bytes[1], 0x4b);
   assert.ok(bytes.length > 500);
 });
+
+import { parsePauseWindows, inPauseWindow, makeInvoiceReminder } from "../src/domain.js";
+
+test("pause windows parse, validate and match correctly", () => {
+  assert.deepEqual(parsePauseWindows(""), []);
+  assert.deepEqual(parsePauseWindows("2026-12-20..2027-01-03"), [
+    { from: "2026-12-20", to: "2027-01-03" },
+  ]);
+  assert.deepEqual(parsePauseWindows("2026-12-25"), [
+    { from: "2026-12-25", to: "2026-12-25" },
+  ]);
+  assert.throws(() => parsePauseWindows("20-12-2026"));
+  assert.throws(() => parsePauseWindows("2027-01-03..2026-12-20"));
+  assert.throws(() => parsePauseWindows("nonsense line"));
+  const s = { ...defaults, pauseWindows: "2026-12-20..2027-01-03\n2027-06-01" };
+  assert.deepEqual(inPauseWindow(s, "2026-12-25"), { from: "2026-12-20", to: "2027-01-03" });
+  assert.deepEqual(inPauseWindow(s, "2027-06-01"), { from: "2027-06-01", to: "2027-06-01" });
+  assert.equal(inPauseWindow(s, "2026-11-30"), null);
+  assert.equal(inPauseWindow(s, "2027-01-04"), null);
+  assert.equal(inPauseWindow({ ...defaults, pauseWindows: "broken" }, "2027-01-04"), null);
+});
+
+test("pause window settings validate through validSettings", () => {
+  const s = validSettings({ pauseWindows: "2026-12-20..2027-01-03" }, defaults);
+  assert.match(s.pauseWindows, /2026-12-20/);
+  assert.throws(() => validSettings({ pauseWindows: "yesterday" }, defaults));
+  assert.throws(() => validSettings({ invoiceRemindersOn: "yes" }, defaults));
+});
+
+test("second follow-up angle is distinct, final and claim-free", () => {
+  const lead = { id: "l1", company: "Northline", niche: "Website & WordPress" };
+  const first = makeFollowup(lead, baseSettings, 4, "Intro", 1);
+  const second = makeFollowup(lead, baseSettings, 4, "Intro", 2);
+  assert.notEqual(first.body, second.body);
+  assert.match(second.body, /last message from me/i);
+  assert.match(second.body, /close the file/i);
+  assert.match(second.body, /No follow-up will be sent automatically/i);
+  for (const f of [first, second]) {
+    assert.equal(f.status, "DRAFT");
+    assert.equal(f.approvedAt, null);
+    assert.ok(!/\d+%|guarantee|clients? (got|increased)/i.test(f.body));
+  }
+});
+
+test("invoice reminder copy is factual and pressure-free", () => {
+  const lead = { id: "l1", company: "Won Co" };
+  const inv = { id: "inv1", amount: 15000, currency: "USD", dueAt: "2026-09-01" };
+  const d = makeInvoiceReminder(lead, inv, baseSettings);
+  assert.equal(d.kind, "invoice-reminder");
+  assert.equal(d.invoiceId, "inv1");
+  assert.equal(d.status, "DRAFT");
+  assert.match(d.subject, /15,000 USD/);
+  assert.match(d.subject, /2026-09-01/);
+  assert.match(d.body, /already paid, please ignore/i);
+  assert.match(d.body, /different arrangement/i);
+  assert.ok(!/late fee|legal action|immediately|urgent/i.test(d.body));
+});

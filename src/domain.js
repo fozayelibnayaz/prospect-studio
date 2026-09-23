@@ -30,6 +30,8 @@ export const defaults = {
   followUpOn: true,
   followUpDays: 4,
   followUpMax: 1,
+  invoiceRemindersOn: true,
+  pauseWindows: "",
 };
 const allCountryCodes =
   "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW".split(
@@ -186,11 +188,21 @@ export function validSettings(input, current) {
     "contentAi",
     "autoReplyWatch",
     "followUpOn",
+    "invoiceRemindersOn",
   ])
     if (k in input) {
       if (typeof input[k] !== "boolean") throw Error("Invalid toggle");
       s[k] = input[k];
     }
+  if ("pauseWindows" in input) {
+    if (
+      typeof input.pauseWindows !== "string" ||
+      input.pauseWindows.length > 1200
+    )
+      throw Error("Pause windows must be a short list, one per line");
+    parsePauseWindows(input.pauseWindows);
+    s.pauseWindows = input.pauseWindows.trim();
+  }
   if ("followUpDays" in input) {
     if (
       !Number.isInteger(input.followUpDays) ||
@@ -403,12 +415,61 @@ ${settings.ownerName} · ${skill}`,
   }
   return items;
 }
-export function makeFollowup(lead, settings, days, originalSubject) {
+const isoDate = /^\d{4}-\d{2}-\d{2}$/;
+export function parsePauseWindows(text) {
+  const out = [];
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/^(\d{4}-\d{2}-\d{2})(?:\s*\.\.\s*(\d{4}-\d{2}-\d{2}))?$/);
+    if (!m || !isoDate.test(m[1]) || (m[2] && !isoDate.test(m[2])))
+      throw Error("Pause windows must look like 2026-12-20..2027-01-03");
+    const from = m[1],
+      to = m[2] || m[1];
+    if (Number.isNaN(Date.parse(from)) || Number.isNaN(Date.parse(to)))
+      throw Error("Pause window has an invalid date");
+    if (to < from) throw Error("Pause window ends before it starts");
+    out.push({ from, to });
+  }
+  if (out.length > 12) throw Error("Keep pause windows to 12 or fewer");
+  return out;
+}
+export function inPauseWindow(settings, dateISO) {
+  let windows;
+  try {
+    windows = parsePauseWindows(settings.pauseWindows);
+  } catch {
+    return null;
+  }
+  const d = String(dateISO).slice(0, 10);
+  return windows.find((w) => d >= w.from && d <= w.to) || null;
+}
+export function makeFollowup(lead, settings, days, originalSubject, touch = 1) {
   const skills = settings.skills?.length ? settings.skills : defaults.skills;
   const skill = skills[(days + (lead.company || "").length) % skills.length];
   const subject = /^re:/i.test(String(originalSubject || ""))
     ? originalSubject
     : "Re: " + (originalSubject || "your website");
+  if (touch >= 2)
+    return {
+      leadId: lead.id,
+      kind: "followup",
+      subject: String(subject).slice(0, 160),
+      body: `Hello,
+
+This is the last message from me about ${(lead.niche || "digital services").toLowerCase()} — I do not send more than two, and you have not asked for anything.
+
+I will close the file after this unless you reply. If a small piece of work would help later (${skill.toLowerCase()}), the easiest thing is to keep this thread and write one line whenever the timing is right.
+
+No follow-up will be sent automatically after this message either way.
+
+Portfolio: ${settings.portfolio}
+
+${settings.ownerName}`,
+      status: "DRAFT",
+      approvedAt: null,
+      createdAt: new Date().toISOString(),
+    };
   return {
     leadId: lead.id,
     kind: "followup",
@@ -478,3 +539,25 @@ export const businessMap = [
   { stage: "Compliance & opt-outs", people: "Stay lawful per country", status: "GUARDED", note: "Suppression, unsubscribe links, per-message evidence. Final legal judgment stays yours." },
   { stage: "Paid advertising", people: "Meta/Google/LinkedIn ads", status: "NOT FREE", note: "Outside this system; no paid fallback anywhere in the app." },
 ];
+export function makeInvoiceReminder(lead, invoice, settings) {
+  const currency = invoice.currency || "USD";
+  const amount = Number(invoice.amount || 0).toLocaleString("en-GB");
+  return {
+    leadId: lead.id,
+    invoiceId: invoice.id,
+    kind: "invoice-reminder",
+    subject: `Invoice reminder — ${amount} ${currency} (due ${invoice.dueAt})`,
+    body: `Hello,
+
+A quiet note about invoice ${invoice.id} for ${amount} ${currency}, which was due on ${invoice.dueAt}. If it is already paid, please ignore this — bank and transfer timing can cross in the post.
+
+If a different arrangement would be easier (a different date, a split payment, or a question about the amount), reply and we will sort it out.
+
+Thank you for the work we did together.
+
+${settings.ownerName}`,
+    status: "DRAFT",
+    approvedAt: null,
+    createdAt: new Date().toISOString(),
+  };
+}

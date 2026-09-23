@@ -280,7 +280,7 @@ function review() {
       S.drafts
         .map((d) => {
           const l = S.leads.find((x) => x.id === d.leadId);
-          return `<section class="card"><div class="card-head"><h2>${esc(l?.company || "Unknown contact")}</h2>${d.kind === "followup" ? badge("FOLLOW-UP", "amber") + " " : ""}${badge(d.status, d.status === "SENT" ? "green" : d.status === "UNKNOWN" ? "red" : "")}</div><p class="muted">To: ${esc(l?.email || "No email")} · ${esc(l?.consent || "NONE")}</p><strong>${esc(d.subject)}</strong><p class="message">${esc(d.body)}</p>${d.failure ? `<p class="notice">${esc(d.failure)}</p>` : ""}${d.status === "UNKNOWN" ? `<button data-reconcile="${esc(d.id)}">Check Gmail Sent (no resend)</button>` : ""}<div class="row"><button data-editdraft="${esc(d.id)}" ${!["DRAFT", "APPROVED"].includes(d.status) ? "disabled" : ""}>Edit message</button><button data-approve="${esc(d.id)}" ${!["DRAFT", "APPROVED"].includes(d.status) ? "disabled" : ""}>Approve this message</button><button class="text-button" data-lead="${esc(d.leadId)}">Contact evidence</button></div></section>`;
+          return `<section class="card"><div class="card-head"><h2>${esc(l?.company || "Unknown contact")}</h2>${d.kind === "followup" ? badge("FOLLOW-UP", "amber") + " " : d.kind === "invoice-reminder" ? badge("INVOICE", "amber") + " " : ""}${badge(d.status, d.status === "SENT" ? "green" : d.status === "UNKNOWN" ? "red" : "")}</div><p class="muted">To: ${esc(l?.email || "No email")} · ${esc(l?.consent || "NONE")}</p><strong>${esc(d.subject)}</strong><p class="message">${esc(d.body)}</p>${d.failure ? `<p class="notice">${esc(d.failure)}</p>` : ""}${d.status === "UNKNOWN" ? `<button data-reconcile="${esc(d.id)}">Check Gmail Sent (no resend)</button>` : ""}<div class="row"><button data-editdraft="${esc(d.id)}" ${!["DRAFT", "APPROVED"].includes(d.status) ? "disabled" : ""}>Edit message</button><button data-approve="${esc(d.id)}" ${!["DRAFT", "APPROVED"].includes(d.status) ? "disabled" : ""}>Approve this message</button><button class="text-button" data-lead="${esc(d.leadId)}">Contact evidence</button></div></section>`;
         })
         .join("") ||
       '<section class="card wide empty"><strong>Your review queue is clear</strong>Open a prospect, review its evidence, then create a draft. No messages are silently generated or sent from a search result.<p><button data-nav="prospects">Open prospects →</button></p></section>'
@@ -505,7 +505,8 @@ function finance() {
       )}</div><section class="card table-card"><div class="card-head"><h2>Invoices</h2></div><div class="table-wrap"><table><thead><tr><th>Customer</th><th>Amount</th><th>Due</th><th>Status</th><th>Actions</th></tr></thead><tbody>${inv
       .map((i) => {
         const l = S.leads.find((x) => x.id === i.leadId);
-        return `<tr><td><strong>${esc(l?.company || "—")}</strong><br><small>${esc(i.note || "")}</small></td><td>${i.amount.toLocaleString()} ${esc(i.currency)}</td><td>${esc(i.dueAt)}</td><td>${badge(i.status, i.status === "PAID" ? "green" : i.status === "OVERDUE" ? "red" : "")}</td><td>${i.status !== "PAID" ? `<button data-payinvoice="${esc(i.id)}">Record payment</button>` : ""}</td></tr>`;
+        const overdue = i.status !== "PAID" && i.dueAt && i.dueAt < S.day;
+        return `<tr><td><strong>${esc(l?.company || "—")}</strong><br><small>${esc(i.note || "")}</small>${i.reminderSentAt ? `<br><small class="muted">Reminder sent ${date(i.reminderSentAt)}</small>` : ""}</td><td>${i.amount.toLocaleString()} ${esc(i.currency)}</td><td>${esc(i.dueAt)}</td><td>${badge(i.status, i.status === "PAID" ? "green" : i.status === "OVERDUE" ? "red" : "")}</td><td><div class="row">${i.status !== "PAID" ? `<button data-payinvoice="${esc(i.id)}">Record payment</button>` : ""}${overdue ? `<button data-invreminder="${esc(i.id)}">Reminder draft</button>` : ""}</div></td></tr>`;
       })
       .join(
         "",
@@ -539,13 +540,26 @@ function reports() {
       "EVIDENCE BEFORE CONFIDENCE",
       "Reports & learning",
       "Reply rates use contacted prospects—not your entire research list.",
-      `<a href="/api/export/mail.xlsx"><button>Email activity XLSX</button></a><a href="/api/export/backup.json"><button>Full backup JSON</button></a><button data-act="snapshot">Create today’s snapshot</button><button data-act="ai">Ask connected AI</button>`,
+      `<a href="/api/export/mail.xlsx"><button>Email activity XLSX</button></a><a href="/api/export/backup.json"><button>Full backup JSON</button></a><button data-act="snapshot">Create today’s snapshot</button>`,
     ) +
-    `<div class="grid columns"><section class="card"><div class="card-head"><h2>Which offers get responses?</h2>${badge("OBSERVATIONAL")}</div>${S.cohorts.map((c) => `<div class="quota-row"><div class="row"><strong>${esc(c.niche)}</strong><span>${c.replied} / ${c.contacted} replied</span></div><div class="meter"><span style="width:${c.replyRate || 0}%"></span></div><small>${esc(c.evidence)} · ${c.won} recorded wins</small></div>`).join("")}<p class="notes">Adaptive mode needs at least 10 contacted prospects in a niche. It uses smoothed reply rates and retains ${S.settings.adaptiveExplore}% exploration. All recorded replies count, including negative replies. Review wins/losses too. This is a routing heuristic, not model training or proof of causation.</p></section><section class="card"><h2>Daily XLSX reports</h2><p class="muted" style="font-size:12px">The clock stores the previous Dhaka day after midnight. Download a private XLSX without Google Sheets.</p>${S.reports.map((r) => `<div class="connected row spread"><div><strong>${esc(r.id)}</strong><br><small>${r.counts.total} rows · as of ${date(r.at)}</small></div><a href="/api/reports/${encodeURIComponent(r.id)}.xlsx"><button>Download XLSX</button></a></div>`).join("") || '<div class="empty">No snapshots yet.</div>'}<p class="footnote">Snapshots are immutable. A manual same-day snapshot can omit records added later that day.</p></section><section class="card wide"><h2>AI suggestions</h2>${S.suggestions.map((x) => `<p class="message">${esc(x.text)}</p><small>${esc(x.status)} · ${date(x.at)}</small>`).join("") || '<p class="muted">Not connected or no suggestions yet. The app’s transparent outcome rules work without AI. Optional Gemini receives only approved skill tags and anonymous niche counts—never contacts, emails, replies or private notes.</p>'}</section></div>`
+    `<div class="grid columns"><section class="card"><div class="card-head"><h2>Which offers get responses?</h2>${badge("OBSERVATIONAL")}</div>${S.cohorts.map((c) => `<div class="quota-row"><div class="row"><strong>${esc(c.niche)}</strong><span>${c.replied} / ${c.contacted} replied</span></div><div class="meter"><span style="width:${c.replyRate || 0}%"></span></div><small>${esc(c.evidence)} · ${c.won} recorded wins</small></div>`).join("")}<p class="notes">Adaptive mode needs at least 10 contacted prospects in a niche. It uses smoothed reply rates and retains ${S.settings.adaptiveExplore}% exploration. All recorded replies count, including negative replies. Review wins/losses too. This is a routing heuristic, not model training or proof of causation.</p></section><section class="card"><h2>Daily XLSX reports</h2><p class="muted" style="font-size:12px">The clock stores the previous Dhaka day after midnight. Download a private XLSX without Google Sheets.</p>${S.reports.map((r) => `<div class="connected row spread"><div><strong>${esc(r.id)}</strong><br><small>${r.counts.total} rows · as of ${date(r.at)}</small></div><a href="/api/reports/${encodeURIComponent(r.id)}.xlsx"><button>Download XLSX</button></a></div>`).join("") || '<div class="empty">No snapshots yet.</div>'}<p class="footnote">Snapshots are immutable. A manual same-day snapshot can omit records added later that day.</p></section><section class="card wide"><h2>AI suggestions</h2>${S.suggestions.map((x) => `<p class="message">${esc(x.text)}</p><small>${esc(x.status)} · ${date(x.at)}</small>`).join("") || '<p class="muted">Not connected or no suggestions yet. The app’s transparent outcome rules work without AI. Optional Gemini receives only approved skill tags and anonymous niche counts—never contacts, emails, replies or private notes.</p>'}<p class="footnote">Run it any time with “Ask AI” in Automation. One anonymous request per week.</p></section><section class="card wide"><h2>Restore from backup</h2><p class="muted" style="font-size:12px">Upload a backup JSON you downloaded from this app. Preview first — nothing is written until you press Restore, and credentials are never restored.</p><label class="file-label">Backup file (.json)<input id="restoreFile" type="file" accept=".json,application/json"></label><div class="detail-grid"><label class="field">Mode<select id="restoreMode"><option value="add">Add missing records only (safest)</option><option value="update">Replace existing records with the backup version</option></select></label></div><div class="row"><button id="restorePreview">Preview restore</button><button class="primary" id="restoreApply">Restore now</button></div><div id="restoreResult"></div><p class="footnote">Restores leads, drafts, replies, tasks, content, campaigns, invoices, settings, suppression and audit events. Snapshots restore as records only (their row detail lives in the XLSX you already downloaded), and Gmail stays connected through the app, never through a file.</p></section></div>`
   );
+}
+function pauseWindowNow() {
+  const txt = String(S.settings.pauseWindows || "");
+  const today = S.day;
+  for (const raw of txt.split(/\r?\n/)) {
+    const m = raw.trim().match(/^(\d{4}-\d{2}-\d{2})(?:\s*\.\.\s*(\d{4}-\d{2}-\d{2}))?$/);
+    if (!m) continue;
+    const from = m[1],
+      to = m[2] || m[1];
+    if (today >= from && today <= to) return { from, to };
+  }
+  return null;
 }
 function automationView() {
   const s = S.settings;
+  const win = pauseWindowNow();
   const lastEv = (t) =>
     [...(S.events || [])].reverse().find((x) => x.type === t)?.at || null;
   const suppressed = S.leads.filter((l) => l.suppressed).length;
@@ -564,10 +578,27 @@ function automationView() {
     {
       name: "Outreach sending",
       what: `Cap ${s.dailySendLimit}/day. ${s.autoSendOptIn ? "Auto-sends recorded opt-in only." : "Every message waits for your approval."} Suppressed contacts never send.`,
-      status: s.paused ? "OFF" : s.autoSendOptIn ? "AUTO · OPT-IN" : "APPROVAL",
-      color: s.paused ? "" : s.autoSendOptIn ? "green" : "amber",
+      status: s.paused
+        ? "OFF"
+        : win
+          ? `PAUSED (window until ${win.to})`
+          : s.autoSendOptIn
+            ? "AUTO · OPT-IN"
+            : "APPROVAL",
+      color: s.paused || win ? "" : s.autoSendOptIn ? "green" : "amber",
       last: lastEv("SENT"),
       action: { act: "send", label: "Process one eligible message" },
+    },
+    {
+      name: "Invoice reminders",
+      what:
+        s.invoiceRemindersOn === false
+          ? "Off."
+          : "Drafts a polite reminder for each overdue unpaid invoice (max 2, 7 days apart). Review-gated like every message.",
+      status: s.invoiceRemindersOn === false ? "OFF" : "ON",
+      color: s.invoiceRemindersOn === false ? "" : "green",
+      last: lastEv("INVOICE_REMINDER"),
+      action: { act: "invoiceReminders", label: "Draft reminders now" },
     },
     {
       name: "Reply watch",
@@ -636,7 +667,7 @@ function automationView() {
         (r) =>
           `<div class="auto-row"><div><strong>${r.name}</strong><p class="muted" style="font-size:12px;margin:4px 0">${esc(r.what)}</p>${r.last ? `<small class="muted">Last run: ${date(r.last)}</small>` : ""}</div><div class="row" style="flex-shrink:0;flex-direction:column;align-items:flex-end;gap:8px">${badge(r.status, r.color)}${r.action ? `<button data-act="${r.action.act}">${r.action.label}</button>` : ""}</div></div>`,
       )
-      .join("")}</section><section class="card" style="margin-top:20px"><h2>Follow-up settings</h2><label class="switch"><input type="checkbox" id="followUpOnT" ${s.followUpOn === false ? "" : "checked"}><span><strong>Follow-up autopilot</strong><small>One honest nudge after silence. Never after a reply, never for held or suppressed contacts, never more than the maximum below.</small></span></label><div class="detail-grid" style="margin-top:12px"><label class="field">Wait days before follow-up (2–14)<input id="followUpDays" type="number" min="2" max="14" value="${s.followUpDays}"></label><label class="field">Extra touches per prospect (1–2)<input id="followUpMax" type="number" min="1" max="2" value="${s.followUpMax}"></label></div><button class="primary" id="saveFollowup">Save follow-up settings</button><p class="footnote">Drafts land in Review & send tagged FOLLOW-UP, with a task on the Work board. Every follow-up still needs your approval unless your auto-send opt-in setting applies.</p></section><p class="notes">The worker wakes every 15 minutes: discovery → send queue → follow-ups → hourly reply watch. Once a day it drafts content. After midnight Dhaka it stores the report; Sunday it builds the digest and emails it to you. “Pause all” stops everything at once.</p>`
+      .join("")}</section><section class="card" style="margin-top:20px"><h2>Follow-up &amp; money settings</h2><label class="switch"><input type="checkbox" id="followUpOnT" ${s.followUpOn === false ? "" : "checked"}><span><strong>Follow-up autopilot</strong><small>One honest nudge after silence, and a second only if you allow it. Never after a reply, never for held or suppressed contacts.</small></span></label><div class="detail-grid" style="margin-top:12px"><label class="field">Wait days before follow-up (2–14)<input id="followUpDays" type="number" min="2" max="14" value="${s.followUpDays}"></label><label class="field">Extra touches per prospect (1–2)<input id="followUpMax" type="number" min="1" max="2" value="${s.followUpMax}"></label></div><label class="switch" style="margin-top:12px"><input type="checkbox" id="invoiceRemindersT" ${s.invoiceRemindersOn === false ? "" : "checked"}><span><strong>Invoice reminders</strong><small>For overdue unpaid invoices: a polite draft, max twice, a week apart. Always a draft for your approval.</small></span></label><label class="field" style="margin-top:12px">Outreach pause windows <small>One per line, e.g. 2026-12-20..2027-01-03 — sending, follow-ups and reminders pause; research and reports continue</small><textarea id="pauseWindows" rows="3" placeholder="2026-12-20..2027-01-03">${esc(s.pauseWindows || "")}</textarea></label><button class="primary" id="saveFollowup">Save follow-up settings</button><p class="footnote">Drafts land in Review &amp; send tagged FOLLOW-UP or INVOICE, with a task on the Work board. Every one still needs your approval unless your auto-send opt-in setting applies.</p></section><p class="notes">The worker wakes every 15 minutes: discovery → send queue → follow-ups → invoice reminders → hourly reply watch. Once a day it drafts content. After midnight Dhaka it stores the report; Sunday it builds the digest and emails it to you. “Pause all” stops everything at once.</p>`
   );
 }
 function settingsView() {
@@ -1001,18 +1032,19 @@ function bind() {
             { action: "settings", value: { paused: !S.settings.paused } },
             "Worker state updated",
           );
-        else if (a === "followup") {
-          const r = await act(
-            { action: a },
-            "Follow-up run finished.",
-          );
+        else if (a === "followup" || a === "invoiceReminders") {
+          const r = await act({ action: a }, "Run finished.");
           if (r && r.created !== undefined)
             toast(
               r.created
-                ? `${r.created} follow-up draft(s) created — review them in Review & send.`
-                : r.skipped
-                  ? "Follow-up autopilot is off."
-                  : "No quiet conversations needed a follow-up yet.",
+                ? `${r.created} ${a === "followup" ? "follow-up" : "invoice reminder"} draft(s) created — review them in Review & send.`
+                : r.skipped === "PAUSE_WINDOW"
+                  ? `Outreach is inside a pause window until ${r.window?.to || "the window ends"}.`
+                  : r.skipped
+                    ? "That autopilot is off."
+                    : a === "followup"
+                      ? "No quiet conversations needed a follow-up yet."
+                      : "No overdue invoice needed a reminder draft.",
             );
         } else
           await act(
@@ -1111,6 +1143,80 @@ function bind() {
     );
     b.disabled = false;
   });
+  const readBackup = () =>
+    new Promise((resolve, reject) => {
+      const f = document.querySelector("#restoreFile")?.files?.[0];
+      if (!f) return reject(Error("Choose a backup .json file first"));
+      if (f.size > 5000000)
+        return reject(Error("That file is larger than 5 MB — backups from this app are smaller"));
+      const r = new FileReader();
+      r.onerror = () => reject(Error("Could not read that file"));
+      r.onload = () => {
+        try {
+          resolve(JSON.parse(r.result));
+        } catch {
+          reject(Error("That file is not valid JSON"));
+        }
+      };
+      r.readAsText(f);
+    });
+  const showRestore = (title, res) => {
+    const box = document.querySelector("#restoreResult");
+    if (!box) return;
+    const rows = Object.entries(res.summary || {})
+      .map(([k, v]) =>
+        v.skipped && !v.new && !v.updated
+          ? `<tr><td>${esc(k)}</td><td colspan="3" class="muted">${esc(v.skipped)}</td></tr>`
+          : `<tr><td>${esc(k)}</td><td>${v.new}</td><td>${v.updated}</td><td>${v.skipped}</td></tr>`,
+      )
+      .join("");
+    box.innerHTML = `<div class="notice" style="margin-top:14px"><strong>${esc(title)}</strong> ${
+      res.dryRun
+        ? `${res.total} record(s) would be written. Nothing has changed yet.`
+        : `${res.written} record(s) written. Reloading…`
+    }</div><div class="table-wrap"><table><thead><tr><th>Record type</th><th>New</th><th>Updated</th><th>Skipped</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  };
+  document.querySelector("#restorePreview")?.addEventListener("click", async () => {
+    const b = document.querySelector("#restorePreview");
+    b.disabled = true;
+    try {
+      const backup = await readBackup();
+      const r = await api({
+        action: "restore",
+        dryRun: true,
+        mode: document.querySelector("#restoreMode").value,
+        backup,
+      });
+      showRestore("Preview only — nothing written", r);
+    } catch (e) {
+      toast(e.message);
+    }
+    b.disabled = false;
+  });
+  document.querySelector("#restoreApply")?.addEventListener("click", async () => {
+    const b = document.querySelector("#restoreApply");
+    try {
+      const backup = await readBackup();
+      const mode = document.querySelector("#restoreMode").value;
+      if (
+        !confirm(
+          mode === "update"
+            ? "Replace existing records with the backup versions? Current edits to those records will be overwritten."
+            : "Add the records from this backup that are missing here? Existing records are left untouched.",
+        )
+      )
+        return;
+      b.disabled = true;
+      const r = await act(
+        { action: "restore", mode, backup },
+        "Backup restored",
+      );
+      if (r) showRestore("Restore complete", r);
+      b.disabled = false;
+    } catch (e) {
+      toast(e.message);
+    }
+  });
   document.querySelector("#saveFollowup")?.addEventListener("click", async () => {
     const b = document.querySelector("#saveFollowup");
     b.disabled = true;
@@ -1121,6 +1227,8 @@ function bind() {
           followUpOn: document.querySelector("#followUpOnT").checked,
           followUpDays: Number(document.querySelector("#followUpDays").value),
           followUpMax: Number(document.querySelector("#followUpMax").value),
+          invoiceRemindersOn: document.querySelector("#invoiceRemindersT").checked,
+          pauseWindows: document.querySelector("#pauseWindows").value,
         },
       },
       "Follow-up settings saved",
@@ -1197,6 +1305,20 @@ function bind() {
         },
         "Metrics recorded.",
       );
+    };
+  });
+  document.querySelectorAll("[data-invreminder]").forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      const r = await act(
+        { action: "invoiceReminder", id: b.dataset.invreminder },
+        "Reminder draft created — review it in Review & send.",
+      );
+      if (r && r.created === 0)
+        toast(
+          "Nothing to draft: this invoice is paid, not overdue, already has an open reminder, or the customer is suppressed.",
+        );
+      b.disabled = false;
     };
   });
   document.querySelectorAll("[data-satisfaction]").forEach((b) => {

@@ -27,8 +27,8 @@ The database creation command prints a `database_id`. Open `wrangler.jsonc` and 
 - `vars.OWNER_EMAIL`: the Google account allowed to sign in.
 - `vars.APP_ORIGIN`: the exact new HTTPS Workers URL, with no trailing slash. With the supplied worker name, this is `https://ayaz-prospect-studio.YOUR-WORKERS-SUBDOMAIN.workers.dev`.
 - `vars.DEMO_MODE`: leave `false`.
-- `vars.TAVILY_PAYGO_DISABLED_CONFIRMED`: set `true` only while your Researcher account has PAYG disabled/not activated. You confirmed it currently requires a card to activate. Do not add a card.
-- `vars.AI_FREE_CONFIRMED`: leave `false` until optional AI is separately verified.
+- `vars.TAVILY_PAYGO_DISABLED_CONFIRMED`: **`true`** — your confirmation that the Tavily account has no PAYG/card. Keep it `true` while that stays true; if you ever activate PAYG, set it `false` first so discovery stops before spending.
+- `vars.AI_FREE_CONFIRMED`: **`true`** — your confirmation that Gemini runs on the free tier. This is a permanent owner setting: it ships as `true` in `wrangler.jsonc`, and `scripts/check-deploy.mjs` now **refuses to deploy** if it is ever `false`, so it can never silently flip back.
 
 Do **not** edit the root demo D1 binding into your real database. Keeping local and production bindings separate prevents fixture data from entering your live workspace.
 
@@ -147,7 +147,7 @@ npx wrangler secret put GEMINI_MODEL --env production
 
 Use a currently available **text model with a free allowance on your unbilled project**. The previous Apps Script generation 404 remains unverified; model-list success is not generation success. Do not guess a paid model or use an unstable `latest` alias as a paid fallback.
 
-After verifying account/model conditions, set `env.production.vars.AI_FREE_CONFIRMED` to `true` and redeploy. Gemini receives fixed skill tags and anonymous per-niche contacted/replied/won counts only. The app cannot independently inspect Google’s billing configuration; that confirmation must remain true in reality. One attempt per seven days, no Google Search grounding, no automatic model training. Advice is not automatically applied as code or messaging authority.
+`env.production.vars.AI_FREE_CONFIRMED` is `true` and enforced by the deploy check (a `false` value aborts the deploy). Gemini receives fixed skill tags and anonymous per-niche contacted/replied/won counts only. The app cannot independently inspect Google’s billing configuration; that confirmation must remain true in reality. One attempt per seven days, no Google Search grounding, no automatic model training. Advice is not automatically applied as code or messaging authority.
 
 Outcome-adaptive targeting works without Gemini and needs at least ten contacted records per relevant cohort before exploiting its observed response rate.
 
@@ -179,3 +179,30 @@ Acceptance before claiming live:
 - Pause, quota limits and provider failures stop safely without a paid upgrade.
 
 If anything fails, pause in Settings and inspect the activity ledger. Do not repeatedly approve or resend uncertain deliveries.
+
+## Source on GitHub + automatic deploy from GitHub
+
+GitHub holds the **source**; Cloudflare keeps hosting the worker and D1. (Do not use GitHub Pages — a Worker with D1 cannot run there.) This repo already contains:
+
+- `.github/workflows/qa.yml` — runs `npm run check` (syntax + 66 Node tests) and the 22 Playwright browser tests on every push and pull request.
+- `.github/workflows/deploy.yml` — on a push to `main` (or a manual "Run workflow"), it runs the tests, validates `wrangler.jsonc`, then deploys `--env production` with Wrangler. It **skips cleanly** until you add the two secrets below; tests still run.
+
+Keep the repository **private**: `wrangler.jsonc` contains your worker URL, owner email and D1 database ID (none of these are secrets, but they are yours). Never commit a ZIP file — push the project files at the repository root.
+
+One-time setup for automatic deploys:
+
+1. Cloudflare dashboard → **My Profile → API Tokens → Create Token** → use the **Edit Cloudflare Workers** template, account-scoped to your account. Copy the token (shown once).
+2. GitHub repo → **Settings → Secrets and variables → Actions → New repository secret**:
+   - `CLOUDFLARE_API_TOKEN` — the token from step 1.
+   - `CLOUDFLARE_ACCOUNT_ID` — from `npx wrangler whoami` (Account ID).
+3. Push to `main`. The Deploy workflow tests, validates and deploys.
+
+Secrets stay in GitHub's encrypted store and in Cloudflare's secret store — never in the repository, never in chat.
+
+Manual deploy remains available and unchanged:
+
+```bash
+npm run deploy
+```
+
+That runs the same `scripts/check-deploy.mjs` guard, so an accidental `AI_FREE_CONFIRMED: "false"` (or a missing placeholder) stops the deploy before anything reaches production.

@@ -18,18 +18,18 @@ A lease prevents ordinary overlapping workers. A message becomes SENDING before 
 | Owner Google authentication | Implemented; owner production authorization pending |
 | Broad/focused/adaptive searches | Implemented; 249 country/territory options, English-query sampling, free caps |
 | Primary-site contact enrichment | Implemented heuristics; not verified recipients, diagnoses or buyer intent |
-| Review, editable drafts, sending toggle | Implemented, locally tested; no real prospect sent from this workspace |
-| Gmail send, suppression, opt-out, uncertain-delivery handling | Implemented; mocked external-provider/D1 tests; actual owner Gmail acceptance pending |
-| Reply sync | Bounded thread matching, not a full inbox or all historical messages |
-| Nurture | Review tasks, dates, drafts and opted-in send gates; no complete multi-step autonomous nurture sequence engine |
-| Marketing | Daily auto-drafted content (template engine; seasonal + skill rotation + owner-recorded case notes), campaigns, rule-based marketing ideas. Posts only after approval. No paid ads, no SEO automation |
+| Review, editable drafts, sending toggle | Implemented; approval gate and toggles tested; the only live send so far was the owner's own test address, never a prospect |
+| Gmail send, suppression, opt-out, uncertain-delivery handling | Implemented; live-verified end-to-end on 2026-09-22 (owner-approved test message sent by the production cron worker and received; suppression/opt-out/uncertain-delivery verified in the D1 test harness, not yet in production traffic) |
+| Reply sync / Email activity | Bounded thread matching (latest 20 inbox messages within 7 days), full body + subject stored per matched reply, deduped by Gmail id. Sent lines come from sent drafts. Not a full inbox or all historical messages |
+| Nurture / Follow-ups | Follow-up autopilot drafts one nudge per quiet conversation after “followUpDays” (2–14, default 4), max 1–2 extra touches with a distinct final wording on the second, never after a reply, hold, suppression, win or loss; each draft gets an oversight task and still passes the approval gate. Seasonal pause windows stop sending, follow-ups and reminders while research continues. No drip campaigns or third touch |
+| Marketing | Daily auto-drafted content from owner topics with optional IDs (template engine + optional Gemini writer), owner-set quantity 1–10/day, write-from-concept, update/rewrite per post with versioning, campaigns, rule-based ideas. Posts only after approval. No paid ads, no SEO automation |
 | Sales | Pipeline stages with history, quotes, win/loss reasons (LOST requires a reason), proposal-ready drafts, invoice creation on wins; no autonomous negotiation or payment collection |
-| Customer success | Automatic day-1/7/30 check-in schedule on wins, welcome draft, weekly digest (Dhaka week) with overdue check-ins, satisfaction scores, invoice tasks. No external ticketing or product telemetry |
+| Customer success | Automatic day-1/7/30 check-in schedule on wins, welcome draft, weekly digest (Dhaka week) delivered to Telegram and emailed to the owner’s own Gmail, satisfaction scores, invoice tasks. No external ticketing or product telemetry |
 | Churn/behaviour | Recorded outcome cohorts, satisfaction trends and overdue-task signals. No predictive churn score; authorised first-party usage/payment data ingestion is not built |
-| Finance | Invoices (draft/sent/paid/overdue) with paid-amount lock, outstanding/paid totals, pipeline quote value; money moves externally (bKash/bank/card), never processed in-app |
-| AI | Optional anonymous suggestions plus deterministic adaptive routing. No trained personal model and no raw CRM sent to Gemini |
+| Finance | Invoices (draft/sent/paid/overdue) with paid-amount lock, outstanding/paid totals, pipeline quote value, and review-gated overdue reminders (manual per invoice, or autopilot: max 2 per invoice, 7 days apart, skipped for suppressed/held customers); money moves externally (bKash/bank/card), never processed in-app |
+| AI | Optional anonymous weekly suggestions plus deterministic adaptive routing; optional Gemini writing for marketing drafts. No trained personal model and no raw CRM, contacts, replies or notes sent to Gemini |
 | Old Google Form/CRM | One-time research import only; no continuous inbound bridge yet |
-| Daily XLSX | Native private downloads from immutable D1 snapshots; no Google Drive needed |
+| Daily XLSX / exports | Native private downloads from immutable D1 snapshots, plus Email activity XLSX (Sent/Received) and a full backup JSON (credentials excluded). **Restore** accepts that file with a dry-run preview and add/update modes; credentials are never restorable and snapshot row detail is not included. No Google Drive needed |
 
 **The requested broader lifecycle system is not fully complete.** This is one integrated app release with functioning core workflows and explicit boundaries, not a claim that every integration or customer analytics feature is operational.
 
