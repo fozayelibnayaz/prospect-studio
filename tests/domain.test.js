@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { marketSummary, citiesFor, cityFor } from "../src/markets.js";
 import {
   defaults,
   metrics,
@@ -9,6 +10,12 @@ import {
   validSettings,
   countryCodes,
   makeDraft,
+  cleanCompanyName,
+  isDirectoryName,
+  classifyReply,
+  EMAIL_STATUS_LABEL,
+  emailStatus,
+  bestEmail,
 } from "../src/domain.js";
 import Research from "../src/research.js";
 import worker from "../src/worker.js";
@@ -70,16 +77,40 @@ test("auto only sends opted-in contacts", () =>
     ),
     null,
   ));
-test("auto off requires approval even for opt-in", () =>
+test("automatic sending is ON by default and can be switched off", () => {
+  /* Owner instruction: the auto toggle defaults to on and he can turn it off. */
+  assert.equal(defaults.autoSendOptIn, true);
+  assert.equal(defaults.autoApprove, true);
+  assert.equal(defaults.emailVerify, true);
   assert.equal(
     eligible(
       { ...lead, consent: "OPT_IN", contactEvidence: "evidence" },
       draft,
       { ...defaults, paused: false },
     ),
+    null,
+    "with the default (on) an opted-in contact sends automatically",
+  );
+  assert.equal(
+    eligible(
+      { ...lead, consent: "OPT_IN", contactEvidence: "evidence" },
+      draft,
+      { ...defaults, paused: false, autoSendOptIn: false },
+    ),
     "Waiting for individual approval",
-  ));
-test("reviewed business basis needs approval in auto mode too", () =>
+    "switching auto off returns every message to manual review",
+  );
+  /* A lead that is not yet approved is still never auto-sent. */
+  assert.equal(
+    eligible(
+      { ...lead, status: "UNREVIEWED", consent: "OPT_IN", contactEvidence: "e" },
+      draft,
+      { ...defaults, paused: false },
+    ),
+    "Review and approve the source first",
+  );
+});
+test("reviewed business basis stays manual until the autopilot approves it", () =>
   assert.equal(
     eligible(
       { ...lead, consent: "BUSINESS_REVIEWED", contactEvidence: "basis" },
@@ -495,4 +526,236 @@ test("invoice reminder copy is factual and pressure-free", () => {
   assert.match(d.body, /already paid, please ignore/i);
   assert.match(d.body, /different arrangement/i);
   assert.ok(!/late fee|legal action|immediately|urgent/i.test(d.body));
+});
+
+import {
+  urgentScore,
+  fitScore,
+  launchPlan,
+  goalPace,
+  healthCheck,
+  PLAYBOOK,
+  CONTENT_STARTERS,
+  makeLocalizedDraft,
+} from "../src/domain.js";
+
+test("urgent rules catch call requests, phone numbers and plain highs", () => {
+  const u = urgentScore("Please call now, we need it today.");
+  assert.equal(u.tier, "URGENT");
+  assert.ok(u.hits.includes("call now"));
+  assert.equal(urgentScore("Reach me on +44 7700 900123 anytime").tier, "URGENT");
+  assert.equal(urgentScore("Happy to meet next week and discuss the proposal").tier, "HIGH");
+  assert.equal(urgentScore("Thanks, noted. No rush.").tier, null);
+  const custom = urgentScore("quoting please, ready to sign", "ready to sign, quoting please");
+  assert.equal(custom.tier, "URGENT");
+  assert.ok(custom.hits.includes("ready to sign"));
+});
+
+test("urgent keywords are bounded and validated through settings", () => {
+  assert.throws(() => validSettings({ urgentWords: "x".repeat(501) }), /Urgent keywords/);
+  assert.throws(() => validSettings({ urgentWords: 42 }), /Urgent keywords/);
+  assert.equal(validSettings({ urgentWords: " call now , rush " }).urgentWords, "call now , rush");
+  assert.throws(() => validSettings({ language: "fr" }), /language/i);
+  assert.equal(validSettings({ language: "bn" }).language, "bn");
+  for (const k of ["goalRevenue", "goalCustomers"]) {
+    assert.throws(() => validSettings({ [k]: -1 }), /goal/i);
+    assert.throws(() => validSettings({ [k]: 100000001 }), /goal/i);
+    assert.throws(() => validSettings({ [k]: "500" }), /goal/i);
+    assert.equal(validSettings({ [k]: 500 })[k], 500);
+  }
+  assert.equal(validSettings({ urgentAi: true }).urgentAi, true);
+  assert.equal(validSettings({ watchAllInbox: true }).watchAllInbox, true);
+  assert.equal(defaults.urgentWatch, true);
+  assert.equal(defaults.urgentAi, false);
+  assert.equal(defaults.watchAllInbox, false);
+  assert.equal(defaults.language, "en");
+});
+
+test("fit score is transparent, bounded and lists its reasons", () => {
+  const weak = fitScore({
+    platform: "wix",
+    analytics: false,
+    hiringSignal: true,
+    socials: {},
+    website: "http://example.com",
+  });
+  const guarded = fitScore({ platform: "wix", analytics: false, suppressed: true, socials: {} });
+  assert.ok(weak.score > guarded.score);
+  assert.ok(weak.score <= 100 && weak.score >= 0);
+  assert.ok(weak.reasons.length > 0 && weak.reasons.length <= 6);
+  assert.ok(weak.reasons.some((r) => /wix/i.test(r)));
+  const none = fitScore({});
+  assert.ok(none.score >= 0 && none.score <= 100);
+});
+
+test("Bangla drafts use the built-in templates and never leave a blank body", () => {
+  const bnLead = { id: "b1", company: "ঢাকা ট্রেডার্স", website: "https://x.example", niche: "ওয়েবসাইট" };
+  const d = makeLocalizedDraft(bnLead, baseSettings, "outreach", "bn");
+  assert.equal(d.language, "bn");
+  assert.ok(/[\u0980-\u09FF]/.test(d.body));
+  assert.ok(!/\{owner\}|\{niche\}|\{portfolio\}/.test(d.body));
+  assert.match(d.body, /audit/i.test(d.body) ? /./ : /অডিট/);
+  const en = makeLocalizedDraft(bnLead, baseSettings, "outreach", "en");
+  assert.notEqual(en.body, d.body);
+  assert.ok(en.body.length > 50);
+  const checkin = makeLocalizedDraft(bnLead, baseSettings, "checkin", "bn");
+  assert.ok(/[\u0980-\u09FF]/.test(checkin.body));
+  const welcome = makeLocalizedDraft(bnLead, baseSettings, "welcome", "bn");
+  assert.ok(/[\u0980-\u09FF]/.test(welcome.body));
+});
+
+test("launch plan is dated, ordered and honest", () => {
+  const plan = launchPlan({ offer: "websites", audience: "cafes", price: "300 USD", city: "Dhaka", hours: "20" });
+  assert.ok(plan.length >= 10);
+  assert.deepEqual(plan.map((p) => p.id)[0], "plan-1");
+  const dates = plan.map((p) => p.due);
+  assert.deepEqual([...dates].sort(), dates);
+  assert.ok(plan.every((p) => p.status === "OPEN" && p.due && p.title));
+  assert.ok(!plan.some((p) => /guarantee|viral|10x/i.test(p.note + p.title)));
+  assert.match(JSON.stringify(plan), /cafes|websites/);
+});
+
+test("goal pace compares the month so far with the pro-rata target", () => {
+  const settings = { ...baseSettings, goalRevenue: 30000, goalCustomers: 3 };
+  const r = goalPace({
+    settings,
+    leads: [{ stage: "WON", replyAt: "2026-09-05T00:00:00Z" }],
+    invoices: [
+      { status: "PAID", amount: 9000, paidAt: "2026-09-10" },
+      { status: "SENT", amount: 5000, dueAt: "2026-09-20" },
+    ],
+    dayISO: "2026-09-15",
+  });
+  assert.equal(r.paidThisMonth, 9000);
+  assert.equal(r.wonThisMonth, 1);
+  assert.equal(r.pace.revenue.target, 30000);
+  assert.equal(r.pace.revenue.soFar, 9000);
+  assert.equal(r.pace.revenue.expected, 15000);
+  assert.equal(r.pace.daysInMonth, 30);
+  const none = goalPace({ settings: baseSettings, leads: [], invoices: [], dayISO: "2026-09-15" });
+  assert.equal(none.pace, null);
+});
+
+test("health check points at money and replies first and never invents data", () => {
+  const items = healthCheck({
+    leads: [{ stage: "REPLIED" }],
+    invoices: [{ id: "i1", status: "SENT", dueAt: "2026-09-01" }],
+    tasks: [{ status: "OPEN", due: "2026-09-02" }],
+    content: [],
+    day: "2026-09-15",
+  });
+  assert.ok(items.some((x) => /invoice/i.test(x.text)));
+  assert.ok(items.some((x) => /answer|conversation/i.test(x.text)));
+  assert.ok(items.every((x) => typeof x.text === "string" && x.text.length > 10));
+  const calm = healthCheck({ leads: [], invoices: [], tasks: [], content: [], day: "2026-09-15" });
+  assert.ok(calm.some((x) => /Nothing posted|Nothing/i.test(x.text)));
+  assert.ok(PLAYBOOK.length >= 10 && CONTENT_STARTERS.length >= 5);
+  assert.ok(PLAYBOOK.every((p) => p.en && p.bn));
+  assert.ok(CONTENT_STARTERS.every((c) => c.en && c.bn));
+});
+
+import { journey, journeyStep, JOURNEY } from "../src/domain.js";
+
+test("journey counts real steps only and never invents progress", () => {
+  const leads = [
+    { id: "a", company: "Fresh", status: "UNREVIEWED", stage: "NEW" },
+    { id: "b", company: "Reviewed", status: "APPROVED", stage: "NEW" },
+    { id: "c", company: "Talked", status: "APPROVED", stage: "REPLIED", firstContactAt: "2026-09-01", replyAt: "2026-09-02" },
+    { id: "d", company: "Won Co", status: "APPROVED", stage: "WON", firstContactAt: "2026-08-01", replyAt: "2026-08-02", quote: 5000 },
+  ];
+  const invoices = [
+    { id: "i1", leadId: "d", status: "SENT", amount: 5000 },
+    { id: "i2", leadId: "d", status: "PAID", amount: 5000 },
+  ];
+  const j = journey(leads, invoices);
+  assert.deepEqual(
+    j.steps.map((s) => s.id),
+    JOURNEY.map((s) => s.id),
+  );
+  assert.equal(j.found, 4);
+  assert.equal(j.steps.find((s) => s.id === "REVIEWED").count, 3);
+  assert.equal(j.steps.find((s) => s.id === "REPLIED").count, 2);
+  assert.equal(j.steps.find((s) => s.id === "WON").count, 1);
+  assert.equal(j.converted, 1);
+  assert.equal(j.steps.find((s) => s.id === "PAID").count, 1);
+  assert.equal(journeyStep({ status: "UNREVIEWED", stage: "NEW" }, []).id, "FOUND");
+  assert.equal(journeyStep(leads[3], invoices).id, "PAID");
+  assert.equal(journeyStep(leads[3], [{ leadId: "d", status: "SENT" }]).id, "INVOICED");
+  assert.ok(j.perLead.length >= 3);
+  assert.ok(j.perLead.every((x) => typeof x.stepLabel === "string" && x.stepLabel.length > 0));
+  assert.equal(j.perLead[0].company, "Won Co");
+  assert.equal(journeyStep({ id: "x", status: "UNREVIEWED", stage: "NEW" }, [{ leadId: "x", status: "SENT" }]).id, "INVOICED");
+});
+
+/* --- v0.8: professional, research-grounded drafts ------------------------- */
+test("outreach draft opens with something actually found in research", () => {
+  const l = {
+    ...lead,
+    company: "Aroma Coffee House",
+    niche: "website & wordpress",
+    platform: "wordpress",
+    analytics: false,
+    type: "New business",
+    cityLabel: "Khulna",
+  };
+  const d = makeLocalizedDraft(l, defaults, "outreach", "en");
+  assert.equal(d.grounded, true);
+  assert.match(d.body, /While looking at Aroma Coffee House's website/);
+  assert.match(d.body, /built on WordPress/);
+  assert.match(d.body, /not assuming anything is broken/);
+  assert.match(d.body, /first months in Khulna/);
+  assert.match(d.subject, /WordPress/);
+  assert.doesNotMatch(d.body, /\[|\{\{|TODO|Lorem/i, "no template placeholders leak into the letter");
+});
+test("a lead with nothing to quote gets an honest letter, not a fake compliment", () => {
+  const d = makeLocalizedDraft({ ...lead, company: "Quiet Co" }, defaults, "outreach", "en");
+  assert.equal(d.grounded, false);
+  assert.equal(d.observation, "");
+  assert.doesNotMatch(d.body, /While looking at/);
+  assert.match(d.body, /Would a short, specific example/);
+});
+test("follow-up keeps the same observation and asks for a clear no", () => {
+  const l = { ...lead, company: "Aroma", analytics: false };
+  const f = makeLocalizedDraft(l, defaults, "followup", "en");
+  assert.match(f.body, /One short follow-up/);
+  assert.match(f.body, /one-word no is completely fine/);
+  assert.match(f.body, /Portfolio:/);
+});
+test("directory titles are stripped back to the real business name", () => {
+  assert.equal(cleanCompanyName("Connect companies | CommissionCrowd", "https://www.commissioncrowd.com/x"), "Connect companies");
+  assert.equal(cleanCompanyName("Acme Joinery — Home", "https://acmejoinery.co.uk"), "Acme Joinery");
+  assert.equal(cleanCompanyName("Bella's Bakery | Facebook", "https://facebook.com/bellas"), "Bella's Bakery");
+  assert.equal(isDirectoryName("Top 10 agencies in Manchester", "https://www.semrush.com/company/acme"), true);
+  assert.equal(isDirectoryName("Acme Joinery", "https://acmejoinery.co.uk"), false);
+});
+test("reply classification names the words it matched, and content beats a forward", () => {
+  const urgent = classifyReply("Please call now — we want to sign this week", { subject: "Re: hello" });
+  assert.equal(urgent.class, "INTERESTED");
+  assert.equal(urgent.tier, "URGENT");
+  assert.ok(urgent.hits.length >= 1);
+  const no = classifyReply("Not interested, please don't call again", { subject: "Re: hello" });
+  assert.equal(no.class, "NEGATIVE");
+  const ooo = classifyReply("I am away until Monday", { subject: "Re: hi" });
+  assert.equal(ooo.class, "OFFICE");
+  const fwd = classifyReply("See below", { subject: "Fwd: hello" });
+  assert.equal(fwd.class, "FORWARD");
+  const interest = classifyReply("Please call now", { subject: "Fwd: hello" });
+  assert.equal(interest.class, "INTERESTED", "real interest is never hidden behind a forward");
+});
+test("every email verdict says what it can and cannot prove", () => {
+  assert.match(EMAIL_STATUS_LABEL.MX_OK, /not a delivery proof/i);
+  assert.equal(emailStatus("owner@example.com", true), "MX_OK");
+  assert.equal(emailStatus("info@example.com", true), "MX_OK_ROLE");
+  assert.equal(emailStatus("owner@example.com"), "SYNTAX_OK");
+  assert.equal(emailStatus("owner@example.com", false), "NO_MAIL_SERVER");
+  assert.equal(emailStatus("bad@mailinator.com", true), "DISPOSABLE");
+  assert.equal(emailStatus("not-an-email", true), "INVALID_SYNTAX");
+  assert.equal(bestEmail([{ email: "info@a.com", status: "MX_OK_ROLE" }, { email: "rakib@a.com", status: "MX_OK" }]).email, "rakib@a.com");
+});
+test("markets cover the world, with real cities inside each country", () => {
+  assert.ok(marketSummary.countries >= 120, "countries: " + marketSummary.countries);
+  assert.ok(marketSummary.cities >= 500, "cities: " + marketSummary.cities);
+  assert.ok(citiesFor("BD").includes("Khulna"));
+  assert.equal(cityFor("BD", 3), "Khulna");
+  assert.ok(cityFor("US", 5).length > 2);
 });

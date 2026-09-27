@@ -2,7 +2,15 @@ let S,
   view = location.hash.slice(1) || "overview",
   search = "",
   filter = "all",
-  mailFilter = "all";
+  mailFilter = "all",
+  sortBy = "",
+  selected = new Set(),
+  draftPicks = new Set(),
+  mailClassFilter = "all",
+  mailSort = "newest",
+  draftSort = "queue",
+  taskSort = "due",
+  taskPicks = new Set();
 const app = document.querySelector("#app"),
   drawer = document.querySelector("#drawer");
 const esc = (v) =>
@@ -29,6 +37,7 @@ const icons = {
   marketing: "M3 11l14-6v14L3 13v-2z M17 8a4 4 0 0 1 0 8 M20 5a8 8 0 0 1 0 14",
   finance: "M12 3v18 M5 8h8a3 3 0 0 1 0 6H8a3 3 0 0 0 0 6h11",
   map: "M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z M9 4v14 M15 6v14",
+  growth: "M12 3v4 M12 7c-4 0-7 3-7 7v4h4v-4a3 3 0 0 1 6 0v4h4v-4c0-4-3-7-7-7z M4 21h16",
 };
 const names = {
   overview: "Overview",
@@ -42,9 +51,28 @@ const names = {
   tasks: "Work & follow-ups",
   reports: "Reports & learning",
   map: "Business map",
+  growth: "Growth & goals",
   automation: "Automation",
   settings: "Settings",
 };
+const BN = {
+  overview: "সারসংক্ষেপ",
+  prospects: "প্রসপেক্ট",
+  review: "রিভিউ ও পাঠান",
+  mail: "ইমেইল কার্যক্রম",
+  pipeline: "সেলস পাইপলাইন",
+  customers: "কাস্টমার",
+  marketing: "মার্কেটিং",
+  finance: "হিসাব",
+  tasks: "কাজ ও ফলো-আপ",
+  reports: "রিপোর্ট ও শেখা",
+  map: "বিজনেস ম্যাপ",
+  automation: "অটোমেশন",
+  settings: "সেটিংস",
+  growth: "গ্রোথ ও লক্ষ্য",
+};
+const lang = () => (S?.settings?.language === "bn" ? "bn" : "en");
+const t = (k) => (lang() === "bn" && BN[k] ? BN[k] : names[k] || k);
 const icon = (k) =>
   `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${icons[k] || icons.overview}"/></svg>`;
 const badge = (t, c = "") => `<span class="badge ${c}">${esc(t)}</span>`;
@@ -106,16 +134,16 @@ async function act(body, success = "Saved") {
   }
 }
 function shell(content) {
-  return `<div class="layout"><aside class="sidebar"><div class="brand"><img class="brand-mark" src="/mark.png" alt="" width="35" height="35"><span>Prospect Studio</span></div><div class="nav-label">YOUR WORKSPACE</div><nav class="nav">${Object.entries(
+  return `<div class="layout"><aside class="sidebar"><a class="brand" href="/" aria-label="Prospect Studio home"><img class="brand-mark" src="/mark.png" alt="" width="35" height="35"><span>Prospect Studio</span></a><div class="nav-label">YOUR WORKSPACE</div><nav class="nav">${Object.entries(
     names,
   )
     .map(
-      ([k, n]) =>
-        `<a href="#${k}" class="${view === k ? "active" : ""}">${icon(k)}${n}</a>`,
+      ([k]) =>
+        `<a href="#${k}" class="${view === k ? "active" : ""}">${icon(k)}${esc(t(k))}</a>`,
     )
     .join(
       "",
-    )}</nav><div class="sidebar-bottom"><div class="row"><span class="badge green">FREE-TIER PILOT</span></div><p style="margin-top:12px">Deliberate outreach.<br>Better conversations.</p><div class="owner"><div class="avatar">FA</div><div>Fozayel Ibn Ayaz<br><small style="color:#a8bec5">Owner workspace</small></div></div></div></aside><main class="main"><header class="topbar"><div class="crumb">Workspace &nbsp; / &nbsp; <strong>${names[view] || "Overview"}</strong></div><div class="row">${badge(S.settings.paused ? "Paused" : "Worker enabled", S.settings.paused ? "amber" : "green")}<span class="muted" style="font-size:12px">Asia / Dhaka</span><button data-act="pause">${S.settings.paused ? "Resume" : "Pause all"}</button><div class="avatar">FA</div></div></header><div class="content">${S.demo ? '<div class="notice"><strong>INTERACTIVE DEMO</strong> · Fictional records. Changes persist only in this local preview. No discovery, email or AI provider calls. Do not import private data here.</div>' : '<div class="notice">Private pilot · Free quotas apply. Source matches are not verified buying interest. Review evidence before contact.</div>'}${content}<p class="footnote">Public contact details ≠ permission or demand. Automatic sending requires recorded opt-in. Replies, suppression and daily caps take priority.</p></div></main></div>`;
+    )}</nav><div class="sidebar-bottom"><div class="row"><span class="badge green">FREE-TIER PILOT</span><span class="badge green" id="appVersion">v${esc(S.version || "0.8.0")}</span></div><p style="margin-top:12px">Deliberate outreach.<br>Better conversations.</p><p style="font-size:11px;color:#cfe0e4">Deployed build v${esc(S.version || "0.8.0")} ${S.demo ? "· demo data" : "· live workspace"}<br><a href="/api/version" style="color:#cfe0e4">/api/version</a></p><div class="owner"><div class="avatar">FA</div><div>Fozayel Ibn Ayaz<br><small style="color:#a8bec5">Owner workspace</small></div></div></div></aside><main class="main" id="${view}" tabindex="-1"><header class="topbar"><div class="crumb">Workspace &nbsp; / &nbsp; <strong>${esc(t(view))}</strong></div><div class="row">${(S.urgent || []).filter((u) => !u.handled && u.tier !== "NORMAL").length ? badge(S.urgent.filter((u) => !u.handled && u.tier !== "NORMAL").length + " URGENT", "red") : ""}${badge(S.settings.paused ? "Paused" : "Worker enabled", S.settings.paused ? "amber" : "green")}<button data-act="lang">${lang() === "bn" ? "EN" : "বাংলা"}</button><span class="muted" style="font-size:12px">Asia / Dhaka</span><button data-act="pause">${S.settings.paused ? "Resume" : "Pause all"}</button><div class="avatar">FA</div></div></header><div class="content">${S.demo ? '<div class="notice"><strong>INTERACTIVE DEMO</strong> · Fictional records. Changes persist only in this local preview. No discovery, email or AI provider calls. Do not import private data here.</div>' : '<div class="notice">Private pilot · Free quotas apply. Source matches are not verified buying interest. Review evidence before contact.</div>'}${content}<p class="footnote">Public contact details ≠ permission or demand. Automatic sending requires recorded opt-in. Replies, suppression and daily caps take priority.</p></div></main></div>`;
 }
 function headline(eyebrow, title, sub, buttons = "") {
   return `<div class="headline"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p class="subtitle">${sub}</p></div><div class="row">${buttons}</div></div>`;
@@ -173,17 +201,18 @@ function modes() {
     )
     .join("")}</div>`;
 }
-function table(leads) {
-  return `<div class="table-wrap"><table><thead><tr><th>Business / prospect</th><th>Market</th><th>Service fit</th><th>Review</th><th>Actions</th></tr></thead><tbody>${leads
+function table(leads, selectable = false) {
+  const allPicked = leads.length > 0 && leads.every((l) => selected.has(l.id));
+  return `<div class="table-wrap"><table><thead><tr>${selectable ? `<th class="check-col"><input type="checkbox" id="selectAllLeads" aria-label="Select all prospects in this list" ${allPicked ? "checked" : ""}></th>` : ""}<th>Business / prospect</th><th>Market</th><th>Service fit</th><th>Email</th><th>Review</th><th>Actions</th></tr></thead><tbody>${leads
     .map(
       (l) =>
-        `<tr><td><div class="company"><span class="monogram">${esc(
+        `<tr>${selectable ? `<td class="check-col"><input type="checkbox" class="pick-lead" data-pick="${esc(l.id)}" ${selected.has(l.id) ? "checked" : ""} aria-label="Select ${esc(l.company)}"></td>` : ""}<td><div class="company"><span class="monogram">${esc(
           l.company
             .split(" ")
             .map((x) => x[0])
             .slice(0, 2)
             .join(""),
-        )}</span><div><strong>${esc(l.company)}</strong><small>${esc(l.type || "Business")}</small></div></div></td><td>${esc(l.country)}</td><td>${esc(l.niche)}</td><td>${badge(l.suppressed ? "SUPPRESSED" : l.status, l.status === "HOLD" ? "amber" : l.status === "APPROVED" ? "green" : "")}</td><td><button class="text-button" data-lead="${esc(l.id)}">Review ↗</button></td></tr>`,
+        )}</span><div><strong>${esc(l.company)}</strong><small>${esc(l.type || "Business")}</small>${l.fitScore !== undefined ? `<small class="fit-chip ${l.fitScore < 45 ? "low" : ""}">Fit ${l.fitScore}/100</small>` : ""}${l.bounced ? " " + badge("BOUNCED", "red") : ""}${l.urgentAt ? " " + badge("URGENT", "red") : ""}</div></div></td><td>${esc(l.cityLabel || l.country)}</td><td>${esc(l.niche)}</td><td>${l.email ? `<span title="${esc(S.emailLabels?.[l.emailStatus] || "")}">${esc(l.email)}</span><br><small class="muted">${esc(S.emailLabels?.[l.emailStatus] || "not checked")}</small>` : '<small class="muted">No address published</small>'}</td><td>${badge(l.suppressed ? "SUPPRESSED" : l.status, l.status === "HOLD" ? "amber" : l.status === "APPROVED" ? "green" : "")}</td><td><button class="text-button" data-lead="${esc(l.id)}">Review ↗</button></td></tr>`,
     )
     .join(
       "",
@@ -218,6 +247,17 @@ function attention() {
   if (!chips.length) return "";
   return `<section class="attention"><span class="muted" style="font-size:12px">NEEDS YOUR EYES:</span>${chips.map((c) => `<a href="#${c.nav}" class="chip">${c.n} ${c.label} →</a>`).join("")}</section>`;
 }
+function urgentBanner() {
+  const list = (S.urgent || []).filter((u) => !u.handled && u.tier !== "NORMAL");
+  if (!list.length) return "";
+  return `<section class="card urgent-card"><div class="card-head"><h2>${list.some((x) => x.tier === "URGENT") ? "Urgent replies — handle first" : "High-interest replies"}</h2>${badge(list.length + " WAITING", "red")}</div>${list
+    .slice(0, 5)
+    .map(
+      (u) =>
+        `<div class="auto-row"><div><strong>${esc(u.tier)} · ${esc(u.subject || u.from || "Reply")}</strong><p class="muted" style="font-size:12px;margin:4px 0">${esc(u.snippet)}</p><small class="muted">${esc((u.hits || []).join(" · "))} · ${date(u.at)}</small></div><div class="row" style="flex-shrink:0;flex-direction:column;align-items:flex-end;gap:8px">${badge(u.tier, "red")}<button data-urgent="${esc(u.id)}">Mark handled</button></div></div>`,
+    )
+    .join("")}<p class="footnote">Rules always run on replies to your own threads; AI scan is optional. Nothing here sends anything.</p></section>`;
+}
 function overview() {
   return (
     headline(
@@ -227,8 +267,9 @@ function overview() {
       `<button data-act="discover">↻ Run discovery</button><button class="primary" data-nav="review">Review queue →</button>`,
     ) +
     attention() +
+    urgentBanner() +
     stats() +
-    `<div class="grid columns"><section class="card"><div class="card-head"><h2>Discovery direction</h2>${badge(S.settings.mode.toUpperCase(), "green")}</div><p class="muted" style="font-size:12px">Your skills lead the search. You decide how wide to look.</p>${modes()}<div class="pill-row">${S.settings.skills.map((x) => `<span class="pill">${esc(x)}</span>`).join("")}</div><div class="coverage"><div class="coverage-label"><strong>${S.settings.mode === "focused" ? S.settings.focusCountries.length : S.countries.length} markets</strong><span>Eligible for rotation · not all researched today</span></div></div></section><section class="card"><div class="card-head"><h2>Automation & limits</h2>${badge("NO PAID FALLBACK")}</div><label class="switch"><input type="checkbox" data-toggle="autoSendOptIn" ${S.settings.autoSendOptIn ? "checked" : ""}><span><strong>Auto-send opted-in</strong><small>${S.settings.autoSendOptIn ? "Eligible opted-in drafts may send automatically." : "Off · every message waits for your approval."}</small></span></label><div class="divider"></div>${[
+    `<div class="grid columns"><section class="card"><div class="card-head"><h2>Discovery direction</h2>${badge(S.settings.mode.toUpperCase(), "green")}</div><p class="muted" style="font-size:12px">Your skills lead the search. You decide how wide to look.</p>${modes()}<div class="pill-row">${S.settings.skills.map((x) => `<span class="pill">${esc(x)}</span>`).join("")}</div><div class="coverage"><div class="coverage-label"><strong>${S.marketCities?.cities || 0} cities in ${S.marketCities?.countries || S.countries.length} countries</strong><span>${S.settings.mode === "focused" ? S.settings.focusCountries.length + " focused countries" : "every market eligible"} · ${S.settings.dailyTarget} researched today · focus: ${S.settings.focusCountries.length} countries</span></div></div></section><section class="card"><div class="card-head"><h2>Automation & limits</h2>${badge("NO PAID FALLBACK")}</div><label class="switch"><input type="checkbox" data-toggle="autoApprove" ${S.settings.autoApprove !== false ? "checked" : ""}><span><strong>Auto-review approval: ${S.settings.autoApprove !== false ? "ON" : "OFF"}</strong><small>${S.settings.autoApprove !== false ? "Drafts that pass every rule are approved for you." : "You approve each draft by hand."}</small></span></label><label class="switch" style="margin-top:10px"><input type="checkbox" data-toggle="autoSendOptIn" ${S.settings.autoSendOptIn !== false ? "checked" : ""}><span><strong>Auto-sending: ${S.settings.autoSendOptIn !== false ? "ON" : "OFF"}</strong><small>${S.settings.autoSendOptIn !== false ? "Approved messages send inside the daily cap." : "Off · every message waits for your approval."}</small></span></label><div class="divider"></div>${[
       ["Search attempts", S.budget.search, 8],
       ["Extraction batches", S.budget.extract, 20],
       ["Monthly reserved credits", S.month.credits, 900],
@@ -250,22 +291,49 @@ function overview() {
     }</section></div>`
   );
 }
+function sortControl(id, options, value) {
+  return `<select id="${id}" aria-label="Sort this list">${options
+    .map(([v, t]) => `<option value="${esc(v)}" ${value === v ? "selected" : ""}>${esc(t)}</option>`)
+    .join("")}</select>`;
+}
+function reviewAutoBar() {
+  const s = S.settings;
+  const on = s.autoApprove !== false,
+    send = s.autoSendOptIn !== false;
+  return `<section class="card" style="margin-bottom:20px"><div class="card-head"><h2>Who is deciding</h2>${badge(on ? "AUTO APPROVE ON" : "YOU APPROVE", on ? "green" : "amber")} ${badge(send ? "AUTO SEND ON" : "YOU SEND", send ? "green" : "amber")}</div><label class="switch"><input type="checkbox" data-toggle="autoApprove" ${on ? "checked" : ""}><span><strong>Automatic approval: ${on ? "ON" : "OFF"}</strong><small>${on ? "Drafts that pass every rule (basis recorded, not suppressed, source kept, cap not reached) are approved without waiting." : "Every draft waits for your click."}</small></span></label><label class="switch" style="margin-top:8px"><input type="checkbox" data-toggle="autoSendOptIn" ${send ? "checked" : ""}><span><strong>Automatic sending: ${send ? "ON" : "OFF"}</strong><small>${send ? "Approved messages send on the next worker run, inside the daily cap." : "Nothing sends until you press send."}</small></span></label><p class="footnote">This is the switch you asked for. Both are ON by default and both can be turned off here — replies, holds and suppressions always win either way.</p></section>`;
+}
 function prospects() {
   const rows = S.leads.filter(
     (l) =>
-      (l.company + " " + l.country + " " + l.niche)
+      (l.company + " " + l.country + " " + l.niche + " " + (l.email || "") + " " + (l.cityLabel || ""))
         .toLowerCase()
         .includes(search.toLowerCase()) &&
       (filter === "all" || l.status === filter),
   );
+  const sorted = [...rows].sort((a, b) =>
+    sortBy === "fit"
+      ? (b.fitScore ?? 0) - (a.fitScore ?? 0)
+      : sortBy === "name"
+        ? String(a.company).localeCompare(String(b.company))
+        : sortBy === "email"
+          ? (b.email ? 1 : 0) - (a.email ? 1 : 0)
+          : sortBy === "city"
+            ? String(a.cityLabel || a.country).localeCompare(String(b.cityLabel || b.country))
+            : 0,
+  );
+  const counts = S.emailCounts || {};
   return (
     headline(
       "RESEARCH, NOT ASSUMPTIONS",
       "Your prospect library",
-      "Business owners, new businesses, agencies, freelancers and public work requests.",
-      `<label class="file-label">Import CSV / JSON<input id="import" type="file" accept=".csv,.json"></label><button class="primary" data-act="discover">Run discovery</button>`,
+      "Business owners, brand-new businesses, agencies, freelancers and public work requests — with the email check result shown honestly for every record.",
+      `<label class="file-label">Import CSV / JSON<input id="import" type="file" accept=".csv,.json"></label><button data-act="findEmails">Find missing emails</button><button data-act="verifyEmails">Check addresses</button><button class="primary" data-act="discover">Run discovery</button>`,
     ) +
-    `<div class="toolbar"><input aria-label="Search prospects" id="search" type="search" placeholder="Search business, country or service…" value="${esc(search)}"><select id="filter" aria-label="Review filter">${["all", "UNREVIEWED", "APPROVED", "HOLD"].map((v) => `<option value="${v}" ${filter === v ? "selected" : ""}>${v === "all" ? "All review states" : v}</option>`).join("")}</select></div><section class="card table-card">${table(rows)}</section><p class="notes">Import your existing Google Sheet as CSV. Imports are deduplicated and do not count as new discovery. Consent and past outcomes are not inferred from imported text.</p>`
+    `<section class="card"><div class="card-head"><h2>Address quality</h2>${badge((counts.MX_OK || 0) + (counts.MX_OK_ROLE || 0) + " CHECKED", "green")}</div><div class="pill-row">${Object.entries(counts)
+      .map(([k, v]) => `<span class="pill">${esc((S.emailLabels || {})[k] || k)} · ${v}</span>`)
+      .join("")}</div><p class="footnote">“Mail server found” means the domain accepts mail — free checking can prove a domain is wrong, never that a person reads that inbox. Nothing here is a delivery guarantee.</p><div class="row" style="margin-top:10px"><button data-act="verifyEmails">Check the next 40 addresses</button><button data-act="findEmails">Read public pages for missing emails</button></div></section>` +
+    `<div class="toolbar"><input aria-label="Search prospects" id="search" type="search" placeholder="Search business, city, country, email or service…" value="${esc(search)}"><select id="filter" aria-label="Review filter">${["all", "UNREVIEWED", "APPROVED", "HOLD"].map((v) => `<option value="${v}" ${filter === v ? "selected" : ""}>${v === "all" ? "All review states" : v}</option>`).join("")}</select><select id="sortBy" aria-label="Sort">${[["", "Newest first"], ["fit", "Best fit first"], ["name", "Name A–Z"], ["email", "With an email first"], ["city", "City A–Z"]].map(([v, t]) => `<option value="${v}" ${sortBy === v ? "selected" : ""}>${t}</option>`).join("")}</select></div>` +
+    `<section class="card table-card"><div class="card-head"><h2>${sorted.length} record(s) shown</h2><span class="muted caps">${selected.size ? selected.size + " SELECTED" : "SELECT ROWS FOR BULK ACTIONS"}</span></div>${table(sorted, true)}<div class="bulk-bar"><div class="row"><strong>Bulk actions</strong><button id="pickPage">Select all ${sorted.length} shown</button><button id="pickNone">Clear selection</button></div><label class="field">Contact basis you reviewed <small>Required for bulk approval — one honest sentence, stored on every selected record</small><textarea id="bulkBasis" rows="2" placeholder="Reviewed each business's public contact page; contact relates to their stated business activity.">${esc(S.settings.bulkBasis || "")}</textarea></label><div class="row"><button class="primary" id="bulkApprove">Mark selected approved</button><button id="bulkHold">Put on hold</button><button id="bulkUnreview">Back to unreviewed</button><button id="bulkDraft">Create drafts for selected</button><button id="bulkVerify">Check their addresses</button><button class="danger" id="bulkSuppress">Suppress selected</button><button id="bulkRestore">Un-suppress selected</button></div></div></section><p class="notes">Import your existing Google Sheet as CSV. Imports are deduplicated and do not count as new discovery. A bulk action is still your decision — the app records the basis you typed and never invents one.</p>`
   );
 }
 function review() {
@@ -276,11 +344,21 @@ function review() {
       "A draft is not permission. Review the recipient, source, contact basis and exact message.",
       `<button data-act="sync">Sync Gmail replies</button><button class="primary" data-act="send">Process one eligible message</button>`,
     ) +
-    `<section class="card" style="margin-bottom:20px"><label class="switch"><input type="checkbox" data-toggle="autoSendOptIn" ${S.settings.autoSendOptIn ? "checked" : ""}><span><strong>Auto-send opted-in: ${S.settings.autoSendOptIn ? "ON" : "OFF"}</strong><small>On: recorded opt-in only. Off: every message needs approval. Suppressed contacts never send.</small></span></label></section><div class="grid two">${
-      S.drafts
+    reviewAutoBar() +
+    `<div class="toolbar">${sortControl("draftSort", [["queue", "Queue order"], ["status", "Status"], ["who", "Recipient A–Z"]], draftSort)}<strong class="caps">${S.drafts.length} message(s) in the queue</strong><span class="muted caps">${draftPicks.size ? draftPicks.size + " SELECTED" : "TICK CARDS TO APPROVE IN BULK"}</span><div class="row"><button id="pickAllDrafts">Select all shown</button><button id="pickNoDrafts">Clear</button><button class="primary" id="approveBulk">Approve selected</button></div></div>` +
+    `<div class="grid two">${
+      [...S.drafts]
+        .sort((a, b) =>
+          draftSort === "who"
+            ? String(S.leads.find((x) => x.id === a.leadId)?.company || "").localeCompare(String(S.leads.find((x) => x.id === b.leadId)?.company || ""))
+            : draftSort === "status"
+              ? String(a.status).localeCompare(String(b.status))
+              : 0,
+        )
         .map((d) => {
           const l = S.leads.find((x) => x.id === d.leadId);
-          return `<section class="card"><div class="card-head"><h2>${esc(l?.company || "Unknown contact")}</h2>${d.kind === "followup" ? badge("FOLLOW-UP", "amber") + " " : d.kind === "invoice-reminder" ? badge("INVOICE", "amber") + " " : ""}${badge(d.status, d.status === "SENT" ? "green" : d.status === "UNKNOWN" ? "red" : "")}</div><p class="muted">To: ${esc(l?.email || "No email")} · ${esc(l?.consent || "NONE")}</p><strong>${esc(d.subject)}</strong><p class="message">${esc(d.body)}</p>${d.failure ? `<p class="notice">${esc(d.failure)}</p>` : ""}${d.status === "UNKNOWN" ? `<button data-reconcile="${esc(d.id)}">Check Gmail Sent (no resend)</button>` : ""}<div class="row"><button data-editdraft="${esc(d.id)}" ${!["DRAFT", "APPROVED"].includes(d.status) ? "disabled" : ""}>Edit message</button><button data-approve="${esc(d.id)}" ${!["DRAFT", "APPROVED"].includes(d.status) ? "disabled" : ""}>Approve this message</button><button class="text-button" data-lead="${esc(d.leadId)}">Contact evidence</button></div></section>`;
+          const canPick = ["DRAFT", "APPROVED"].includes(d.status);
+          return `<section class="card"><div class="card-head"><h2>${esc(l?.company || "Unknown contact")}</h2>${d.kind === "followup" ? badge("FOLLOW-UP", "amber") + " " : d.kind === "invoice-reminder" ? badge("INVOICE", "amber") + " " : ""}${badge(d.status, d.status === "SENT" ? "green" : d.status === "UNKNOWN" ? "red" : "")}</div><label class="switch" style="margin-bottom:8px"><input type="checkbox" class="pick-draft" data-pickdraft="${esc(d.id)}" ${canPick ? "" : "disabled"} ${draftPicks.has(d.id) ? "checked" : ""}><span><strong>Include in bulk approval</strong><small>${esc(l?.consent || "NONE")} basis recorded${l?.emailStatus ? " · " + esc(S.emailLabels?.[l.emailStatus] || "") : ""}</small></span></label><p class="muted">To: ${esc(l?.email || "No email")}${l?.emailVerifiedAt ? " · checked " + date(l.emailVerifiedAt) : ""}</p><strong>${esc(d.subject)}</strong><p class="message">${esc(d.body)}</p>${d.observation || l?.observation ? `<p class="notice"><strong>Why this is personal:</strong> ${esc(d.observation || l.observation)}</p>` : ""}${d.failure ? `<p class="notice">${esc(d.failure)}</p>` : ""}${d.status === "UNKNOWN" ? `<button data-reconcile="${esc(d.id)}">Check Gmail Sent (no resend)</button>` : ""}<div class="row"><button data-editdraft="${esc(d.id)}" ${!canPick ? "disabled" : ""}>Edit message</button><button data-approve="${esc(d.id)}" ${!canPick ? "disabled" : ""}>Approve this message</button><button class="text-button" data-lead="${esc(d.leadId)}">Contact evidence</button></div></section>`;
         })
         .join("") ||
       '<section class="card wide empty"><strong>Your review queue is clear</strong>Open a prospect, review its evidence, then create a draft. No messages are silently generated or sent from a search result.<p><button data-nav="prospects">Open prospects →</button></p></section>'
@@ -321,9 +399,37 @@ function mailData() {
     .slice(0, 200);
   return { out, inn, all };
 }
+function inboundCard() {
+  const classes = S.inbox || [];
+  const shown = classes.filter((x) => mailClassFilter === "all" || (x.class || "NORMAL") === mailClassFilter);
+  const label = { INTERESTED: "Interested", NEGATIVE: "Says no / stop", OFFICE: "Out of office", FORWARD: "Forward / new sender", NORMAL: "Ordinary" };
+  const colour = { INTERESTED: "green", NEGATIVE: "red", OFFICE: "", FORWARD: "amber", NORMAL: "" };
+  const gaps = S.inboxGaps || [];
+  return `<section class="card" style="margin-bottom:20px"><div class="card-head"><h2>Every message that passed through (weekly skim)</h2>${badge(classes.length + " STORED")}</div><p class="muted" style="font-size:12px">Nothing here was answered, suppressed or acted on automatically. Use it to see which “act now” phrases your keyword list is still missing.</p><div class="row" style="margin-bottom:10px">${["all", "INTERESTED", "NEGATIVE", "FORWARD", "OFFICE", "NORMAL"].map((c) => `<button class="${mailClassFilter === c ? "primary" : ""}" data-mclass="${c}">${c === "all" ? "Everything" : label[c]}</button>`).join("")}</div>${
+    shown.length
+      ? shown
+          .slice(0, 25)
+          .map(
+            (r) =>
+              `<div class="auto-row"><div><strong>${esc(label[r.class] || r.class || "Ordinary")} · ${esc(r.subject || r.from || "message")}</strong><p class="muted" style="font-size:12px;margin:4px 0">${esc(r.snippet || r.body || "")}</p><small class="muted">${esc((r.hits || []).join(" · ") || r.why || "")}${r.at ? " · " + date(r.at) : ""}</small></div><div class="row" style="flex-shrink:0;flex-direction:column;align-items:flex-end;gap:6px">${badge(label[r.class] || "Ordinary", colour[r.class] || "")}${r.leadId ? `<button data-lead="${esc(r.leadId)}">Open lead</button>` : ""}</div></div>`,
+          )
+          .join("")
+      : '<div class="empty">No messages stored yet. Connect Gmail and the one-minute watch will fill this list.</div>'
+  }${gaps.length ? `<div class="divider"></div><h3 style="margin:0 0 6px">Phrases that appear twice but are not in your keyword list</h3><div class="pill-row">${gaps.map((g) => `<span class="pill">${esc(g.word)} · ${g.count}</span>`).join("")}</div><p class="footnote">Add the useful ones in Settings → urgent keywords.</p>` : ""}</section>`;
+}
 function mailView() {
   const { out, inn, all } = mailData();
-  const rows = all.filter((x) => mailFilter === "all" || x.dir === mailFilter);
+  const rows = all
+    .filter((x) => mailFilter === "all" || x.dir === mailFilter)
+    .sort((a, b) =>
+      mailSort === "subject"
+        ? String(a.subject).localeCompare(String(b.subject))
+        : mailSort === "who"
+          ? String(a.who).localeCompare(String(b.who))
+          : mailSort === "oldest"
+            ? String(a.at).localeCompare(String(b.at))
+            : String(b.at).localeCompare(String(a.at)),
+    );
   return (
     headline(
       "EVERY CONVERSATION, ON RECORD",
@@ -331,6 +437,7 @@ function mailView() {
       "Which message went out, which reply came back, and exactly what it said. Sent lines come from your sent drafts; replies are matched to their thread by the worker.",
       `<button data-act="sync">Sync Gmail replies</button>`,
     ) +
+    inboundCard() +
     `<div class="row" style="margin-bottom:14px">${[
       ["all", "All " + all.length],
       ["out", "Sent " + out.length],
@@ -340,7 +447,7 @@ function mailView() {
         ([k, label]) =>
           `<button class="${mailFilter === k ? "primary" : ""}" data-mailfilter="${k}">${label}</button>`,
       )
-      .join("")}</div>` +
+      .join("")}${sortControl("mailSort", [["newest", "Newest first"], ["oldest", "Oldest first"], ["subject", "Subject A–Z"], ["who", "Contact A–Z"]], mailSort)}</div>` +
     `<section class="card table-card"><div class="table-wrap"><table><thead><tr><th>Direction</th><th>Business / contact</th><th>Subject</th><th>When</th><th><span class="sr-only">Open message</span></th></tr></thead><tbody>${
       rows
         .map(
@@ -524,14 +631,27 @@ function bmap() {
   );
 }
 function tasks() {
+  const rows = [...S.tasks].sort((a, b) =>
+    taskSort === "due"
+      ? String(a.due).localeCompare(String(b.due))
+      : taskSort === "title"
+        ? String(a.title).localeCompare(String(b.title))
+        : taskSort === "type"
+          ? String(a.type || "").localeCompare(String(b.type || ""))
+          : taskSort === "open"
+            ? (a.status === "DONE" ? 1 : 0) - (b.status === "DONE" ? 1 : 0)
+            : 0,
+  );
+  const allPicked = rows.length > 0 && rows.every((t) => taskPicks.has(t.id));
   return (
     headline(
       "KEEP YOUR PROMISES",
       "Work & follow-ups",
-      "One reviewable board for nurture, marketing tasks, onboarding, support and renewals.",
+      "One reviewable board for nurture, marketing tasks, onboarding, support and renewals — including the revisit date every sent message creates.",
       `<button class="primary" data-act="newTask">＋ New task</button>`,
     ) +
-    `<section class="card table-card"><div class="table-wrap"><table><thead><tr><th>Task</th><th>Type</th><th>Due</th><th>Status</th><th>Actions</th></tr></thead><tbody>${S.tasks.map((t) => `<tr><td><strong>${esc(t.title)}</strong><br><small>${esc(S.leads.find((l) => l.id === t.leadId)?.company || "Workspace")}</small></td><td>${badge(t.type)}</td><td>${esc(t.due)}</td><td>${badge(t.status, t.status === "DONE" ? "green" : t.due < S.day ? "amber" : "")}</td><td>${t.status !== "DONE" ? `<button data-donetask="${esc(t.id)}">Mark done</button>` : ""}</td></tr>`).join("")}</tbody></table></div>${!S.tasks.length ? '<div class="empty">No tasks. Add a follow-up or service milestone.</div>' : ""}</section><p class="notes">Tasks do not send messages or publish posts. Prepare a draft separately and apply your sending policy. Overdue tasks remain visible until completed.</p>`
+    `<div class="toolbar">${sortControl("taskSort", [["due", "Soonest due first"], ["open", "Open before done"], ["title", "Title A–Z"], ["type", "Type"]], taskSort)}<span class="muted caps">${taskPicks.size ? taskPicks.size + " SELECTED" : rows.length + " TASK(S)"}</span><div class="row"><button id="taskPickAll">Select all shown</button><button id="taskPickNone">Clear</button><button class="primary" id="taskBulkDone">Mark selected done</button><button id="taskBulkReopen">Reopen selected</button></div></div>` +
+    `<section class="card table-card"><div class="table-wrap"><table><thead><tr><th class="check-col"><input type="checkbox" id="taskSelectAll" aria-label="Select all tasks in this list" ${allPicked ? "checked" : ""}></th><th>Task</th><th>Type</th><th>Due</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows.map((t) => `<tr><td class="check-col"><input type="checkbox" class="pick-task" data-picktask="${esc(t.id)}" ${taskPicks.has(t.id) ? "checked" : ""} aria-label="Select ${esc(t.title)}"></td><td><strong>${esc(t.title)}</strong><br><small>${esc(S.leads.find((l) => l.id === t.leadId)?.company || "Workspace")}${t.due === S.day && t.status !== "DONE" ? " · due today" : ""}</small></td><td>${badge(t.type)}</td><td>${esc(t.due)}</td><td>${badge(t.status, t.status === "DONE" ? "green" : t.due < S.day ? "amber" : "")}</td><td>${t.status !== "DONE" ? `<button data-donetask="${esc(t.id)}">Mark done</button>` : `<button data-reopentask="${esc(t.id)}">Reopen</button>`}</td></tr>`).join("")}</tbody></table></div>${!S.tasks.length ? '<div class="empty">No tasks. Add a follow-up or service milestone.</div>' : ""}</section><p class="notes">Tasks do not send messages or publish posts. Prepare a draft separately and apply your sending policy. Overdue tasks remain visible until completed. The revisit date on a sent message becomes a task here — moving it does not resend anything.</p>`
   );
 }
 function reports() {
@@ -556,6 +676,23 @@ function pauseWindowNow() {
     if (today >= from && today <= to) return { from, to };
   }
   return null;
+}
+function autoPanel() {
+  const s = S.settings;
+  const on = s.autoApprove !== false;
+  const send = s.autoSendOptIn !== false;
+  return `<section class="card" style="margin-bottom:20px;border-left:4px solid ${on && send ? "var(--green, #2f9e6b)" : "#c8922a"}"><div class="card-head"><h2>Automatic approval &amp; sending</h2>${badge(on && send ? "ON BY DEFAULT" : on ? "APPROVE ONLY" : "OFF", on && send ? "green" : "amber")}</div><p class="muted" style="font-size:13px">This is the switch you asked for. It ships <strong>ON</strong>: the studio checks every draft against its own rules (recorded basis, no suppression, source kept, cap not reached) and approves + sends what passes. Turn either switch <strong>off</strong> and that step waits for your click instead — nothing else changes, and every action still appears in Activity with the reason.</p><label class="switch"><input type="checkbox" data-toggle="autoApprove" ${on ? "checked" : ""}><span><strong>Automatic review approval: ${on ? "ON" : "OFF"}</strong><small>ON: drafts that pass every rule are approved without waiting · OFF: you approve each one</small></span></label><label class="switch"><input type="checkbox" data-toggle="autoSendOptIn" ${send ? "checked" : ""}><span><strong>Automatic sending: ${send ? "ON" : "OFF"}</strong><small>ON: approved messages send inside the daily cap · OFF: nothing sends until you press send</small></span></label><label class="switch"><input type="checkbox" data-toggle="emailVerify" ${s.emailVerify !== false ? "checked" : ""}><span><strong>Check addresses automatically: ${s.emailVerify !== false ? "ON" : "OFF"}</strong><small>Free MX check on new records, plus reading public contact pages for missing emails</small></span></label>${!on || !send ? '<p class="notice">Manual mode is on — every draft and every message now waits for you in Review &amp; send.</p>' : ""}</section>`;
+}
+function notifyPanel() {
+  const s = S.settings;
+  const groups = S.notifyKeys || [];
+  const onCount = groups.filter((k) => s[k.key] !== false).length;
+  return `<section class="card" style="margin-bottom:20px"><div class="card-head"><h2>Telegram alerts — every case</h2>${badge(onCount + "/" + groups.length + " ON", "green")}</div><p class="muted" style="font-size:13px">You said two alerts a day was not enough. Each of these is its own alert, and each message says <em>why</em> it fired — including the exact words that matched.</p><label class="switch"><input type="checkbox" data-toggle="notifyAll" ${s.notifyAll !== false ? "checked" : ""}><span><strong>All alerts: ${s.notifyAll !== false ? "ON" : "OFF"}</strong><small>Master switch — off means you only get urgent replies and errors.</small></span></label><div class="notify-grid">${groups
+    .map(
+      (k) =>
+        `<label class="notify-item"><input type="checkbox" data-toggle="${esc(k.key)}" ${s[k.key] !== false ? "checked" : ""}><span><strong>${esc(k.label)}</strong><small>${esc(k.why)}</small></span></label>`,
+    )
+    .join("")}</div><div class="row" style="margin-top:12px"><button data-act="notifyPreview">Preview an alert</button><button data-act="testNotify">Send a test alert to Telegram</button></div></section>`;
 }
 function automationView() {
   const s = S.settings;
@@ -599,6 +736,22 @@ function automationView() {
       color: s.invoiceRemindersOn === false ? "" : "green",
       last: lastEv("INVOICE_REMINDER"),
       action: { act: "invoiceReminders", label: "Draft reminders now" },
+    },
+    {
+      name: "Urgent reply watch (every minute)",
+      what: `Checks the newest inbox mail each minute for replies to your threads and flags "call now / urgent / ASAP / phone number" matches. AI scan ${s.urgentAi ? "on (reads only the matched reply)" : "off"}. ${s.watchAllInbox ? "Whole-inbox watch is ON." : "Only replies to your own sent threads are watched."}`,
+      status: s.urgentWatch === false ? "OFF" : "ON",
+      color: s.urgentWatch === false ? "" : "green",
+      last: lastEv("URGENT"),
+      action: { act: "urgentCheck", label: "Check now" },
+    },
+    {
+      name: "Discovery source / fallback",
+      what: `Now using ${S.runtime?.discoveryMode?.mode || "TAVILY"}${S.runtime?.discoveryMode?.reason ? " — " + S.runtime.discoveryMode.reason : ""}. Chain: Tavily (900 free credits) → Google Programmable Search (free 100/day) → OpenStreetMap local mode. OSM data © OpenStreetMap contributors.`,
+      status: (S.runtime?.discoveryMode?.mode || "TAVILY") === "TAVILY" ? "PRIMARY" : "FALLBACK",
+      color: (S.runtime?.discoveryMode?.mode || "TAVILY") === "TAVILY" ? "green" : "amber",
+      last: S.runtime?.discoveryMode?.at ? new Date(S.runtime.discoveryMode.at).toISOString() : null,
+      action: { act: "discover", label: "Run discovery now" },
     },
     {
       name: "Reply watch",
@@ -662,12 +815,68 @@ function automationView() {
       "Every worker on one screen: what it does, whether it is on, when it last ran, and a button to run it now. Nothing here sends without your approval rules or posts without your sign-off.",
       `<button data-act="pause">${s.paused ? "Resume all" : "Pause all"}</button>`,
     ) +
+    autoPanel() +
+    notifyPanel() +
     `<section class="card">${rows
       .map(
         (r) =>
           `<div class="auto-row"><div><strong>${r.name}</strong><p class="muted" style="font-size:12px;margin:4px 0">${esc(r.what)}</p>${r.last ? `<small class="muted">Last run: ${date(r.last)}</small>` : ""}</div><div class="row" style="flex-shrink:0;flex-direction:column;align-items:flex-end;gap:8px">${badge(r.status, r.color)}${r.action ? `<button data-act="${r.action.act}">${r.action.label}</button>` : ""}</div></div>`,
       )
-      .join("")}</section><section class="card" style="margin-top:20px"><h2>Follow-up &amp; money settings</h2><label class="switch"><input type="checkbox" id="followUpOnT" ${s.followUpOn === false ? "" : "checked"}><span><strong>Follow-up autopilot</strong><small>One honest nudge after silence, and a second only if you allow it. Never after a reply, never for held or suppressed contacts.</small></span></label><div class="detail-grid" style="margin-top:12px"><label class="field">Wait days before follow-up (2–14)<input id="followUpDays" type="number" min="2" max="14" value="${s.followUpDays}"></label><label class="field">Extra touches per prospect (1–2)<input id="followUpMax" type="number" min="1" max="2" value="${s.followUpMax}"></label></div><label class="switch" style="margin-top:12px"><input type="checkbox" id="invoiceRemindersT" ${s.invoiceRemindersOn === false ? "" : "checked"}><span><strong>Invoice reminders</strong><small>For overdue unpaid invoices: a polite draft, max twice, a week apart. Always a draft for your approval.</small></span></label><label class="field" style="margin-top:12px">Outreach pause windows <small>One per line, e.g. 2026-12-20..2027-01-03 — sending, follow-ups and reminders pause; research and reports continue</small><textarea id="pauseWindows" rows="3" placeholder="2026-12-20..2027-01-03">${esc(s.pauseWindows || "")}</textarea></label><button class="primary" id="saveFollowup">Save follow-up settings</button><p class="footnote">Drafts land in Review &amp; send tagged FOLLOW-UP or INVOICE, with a task on the Work board. Every one still needs your approval unless your auto-send opt-in setting applies.</p></section><p class="notes">The worker wakes every 15 minutes: discovery → send queue → follow-ups → invoice reminders → hourly reply watch. Once a day it drafts content. After midnight Dhaka it stores the report; Sunday it builds the digest and emails it to you. “Pause all” stops everything at once.</p>`
+      .join("")}</section><section class="card" style="margin-top:20px"><h2>Follow-up &amp; money settings</h2><label class="switch"><input type="checkbox" id="followUpOnT" ${s.followUpOn === false ? "" : "checked"}><span><strong>Follow-up autopilot</strong><small>One honest nudge after silence, and a second only if you allow it. Never after a reply, never for held or suppressed contacts.</small></span></label><div class="detail-grid" style="margin-top:12px"><label class="field">Wait days before follow-up (2–14)<input id="followUpDays" type="number" min="2" max="14" value="${s.followUpDays}"></label><label class="field">Extra touches per prospect (1–2)<input id="followUpMax" type="number" min="1" max="2" value="${s.followUpMax}"></label></div><label class="switch" style="margin-top:12px"><input type="checkbox" id="invoiceRemindersT" ${s.invoiceRemindersOn === false ? "" : "checked"}><span><strong>Invoice reminders</strong><small>For overdue unpaid invoices: a polite draft, max twice, a week apart. Always a draft for your approval.</small></span></label><label class="field" style="margin-top:12px">Outreach pause windows <small>One per line, e.g. 2026-12-20..2027-01-03 — sending, follow-ups and reminders pause; research and reports continue</small><textarea id="pauseWindows" rows="3" placeholder="2026-12-20..2027-01-03">${esc(s.pauseWindows || "")}</textarea></label><button class="primary" id="saveFollowup">Save follow-up settings</button><p class="footnote">Drafts land in Review &amp; send tagged FOLLOW-UP or INVOICE, with a task on the Work board. Every one still needs your approval unless your auto-send opt-in setting applies.</p></section><p class="notes">The worker wakes every minute for urgent replies and every 15 minutes for the rest: discovery → send queue → follow-ups → invoice reminders → hourly reply watch. Once a day it drafts content. After midnight Dhaka it stores the report; Sunday it builds the digest and emails it to you. “Pause all” stops everything at once.</p>`
+  );
+}
+function growthView() {
+  const s = S.settings;
+  const pace = S.goals?.pace;
+  const health = S.health?.items || [];
+  const play = S.playbook || [];
+  const starters = S.contentStarters || [];
+  const bn = lang() === "bn";
+  const bar = (label, soFar, target, expected, money) => {
+    if (target === null || target === undefined || !target) return "";
+    const pct = Math.min(100, Math.round((soFar / target) * 100));
+    const behind = soFar < (expected || 0);
+    return `<div style="margin-bottom:14px"><div class="row spread"><strong>${label}</strong><span class="muted">${money ? soFar + " / " + target : soFar + " / " + target}</span></div><div class="goal-bar ${behind ? "behind" : ""}"><span style="width:${pct}%"></span></div><small class="muted">${pct}% of target · expected by day ${pace?.dayOfMonth || "—"}: ${expected ?? 0}${behind ? " — behind pace" : " — on pace"}</small></div>`;
+  };
+  return (
+    headline(
+      "FROM ZERO TO FIRST CUSTOMER",
+      "Growth & goals",
+      "A 30-day launch plan, a first-customers playbook, your goals and pace, and a weekly health check — everything a brand-new business owner needs, in your own language.",
+      `<button data-act="health">Run health check</button>`,
+    ) +
+    `<div class="grid two"><section class="card"><h2>Goals & pace</h2><div class="detail-grid"><label class="field">Monthly revenue goal<input id="goalRevenue" type="number" min="0" step="any" value="${esc(s.goalRevenue || 0)}"></label><label class="field">Monthly new customers goal<input id="goalCustomers" type="number" min="0" step="1" value="${esc(s.goalCustomers || 0)}"></label></div><button class="primary" id="saveGoals">${bn ? "লক্ষ্য সংরক্ষণ করুন" : "Save goals"}</button><div class="divider"></div>${bar(bn ? "এই মাসের আয়" : "Revenue this month", pace?.revenue?.soFar ?? 0, pace?.revenue?.target, pace?.revenue?.expected, true)}${bar(bn ? "নতুন কাস্টমার" : "New customers this month", pace?.customers?.soFar ?? 0, pace?.customers?.target, pace?.customers?.expected, false)}${pace ? "" : '<p class="notes">Set a monthly goal and the app shows whether you are on pace — no guessing.</p>'}</section><section class="card"><h2>Weekly business health check</h2>${health
+      .map(
+        (h) =>
+          `<div class="play-row"><span>${h.level === "high" ? "🔴" : h.level === "medium" ? "🟠" : h.level === "ok" ? "🟢" : "🔵"}</span><div><strong>${esc(h.text)}</strong></div></div>`,
+      )
+      .join("") || '<p class="notes">No check stored yet — run one now.</p>'}<p class="footnote">Stored every Sunday automatically and pushed to Telegram when connected. It only reads your own data.</p></section></div>
+    <section class="card" style="margin-top:20px"><div class="card-head"><h2>${bn ? "যাত্রা: শুরু থেকে পেইড কাস্টমার" : "Journey: start → paying customer"}</h2>${badge((S.journey?.converted || 0) + " CUSTOMER(S)")}</div><p class="muted" style="font-size:12px">Every prospect's real path through your workspace, counted from your own records. No stage is marked unless the record says so.</p><div class="pipe" style="margin-bottom:14px">${(S.journey?.steps || [])
+      .map((s2, i) => `<span class="pipe-step ${(S.journey?.converted || 0) > 0 && i <= 5 ? "done" : ""}">${esc((bn ? (s2.label === "Discovered" ? "খুঁজে পাওয়া" : s2.label === "Reviewed by you" ? "আপনি দেখেছেন" : s2.label === "Contacted" ? "যোগাযোগ" : s2.label === "Replied" ? "উত্তর" : s2.label === "Proposal / quote" ? "প্রস্তাব" : s2.label === "Customer" ? "কাস্টমার" : s2.label === "Invoiced" ? "ইনভয়েস" : "পরিশোধিত") : s2.label))} · ${s2.count}</span>`)
+      .join("")}</div>${
+      (S.journey?.perLead || []).length
+        ? `<div class="table-wrap"><table><thead><tr><th>Business</th><th>Sales stage</th><th>Journey step</th></tr></thead><tbody>${(S.journey?.perLead || [])
+            .map(
+              (x) =>
+                `<tr><td>${esc(x.company)}</td><td>${badge(x.stage)}</td><td><span class="pipe-step ${x.paid ? "done" : "now"}">${esc(x.stepLabel)}</span></td></tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : '<p class="notes">Review a prospect and the journey will start filling in — discovery → review → contact → reply → proposal → customer → invoice → paid.</p>'
+    }<p class="footnote">${esc(String(S.journey?.found ?? 0))} prospect(s) discovered · ${esc(String(S.journey?.converted ?? 0))} became customers · ${esc(String(S.journey?.paid ?? 0))} paid.</p></section>
+    <section class="card"><div class="card-head"><h2>30-day launch plan</h2>${badge("QUESTIONS → REAL TASKS")}</div><p class="muted" style="font-size:12px">Answer five quick questions; the app turns them into dated tasks on your Work board (with follow-ups, content and invoicing moments).</p><div class="detail-grid"><label class="field">What do you offer?<input id="lpOffer" value="${esc(s.niche || "")}" maxlength="80"></label><label class="field">Who is it for?<input id="lpAudience" placeholder="small shops in Dhaka" maxlength="80"></label></div><div class="detail-grid"><label class="field">Starting price (optional)<input id="lpPrice" placeholder="e.g. 250 USD pilot" maxlength="40"></label><label class="field">Your city (optional)<input id="lpCity" value="${esc(s.ownerCity || "Dhaka")}" maxlength="60"></label></div><label class="field">Hours you can give this week<input id="lpHours" type="number" min="2" max="60" value="10"></label><button class="primary" id="makePlan">${bn ? "৩০ দিনের পরিকল্পনা তৈরি করুন" : "Build my 30-day plan"}</button>${(S.plans || []).length ? `<p class="notes">Last plan: ${esc((S.plans[0].id || "").slice(0, 30))} · ${S.plans[0].count} tasks.</p>` : ""}</section>
+    <section class="card"><div class="card-head"><h2>${bn ? "প্রথম কাস্টমার পাওয়ার প্লেবুক" : "First-customers playbook"}</h2>${badge(play.length + " STEPS")}</div><p class="muted" style="font-size:12px">Tick the ones you want and add them as tasks. Small, honest, repeatable steps — no tricks.</p>${play
+      .map(
+        (p) =>
+          `<label class="play-row"><input type="checkbox" data-play="${esc(p.id)}"><div><strong>${esc(bn ? p.bn : p.en)}</strong></div></label>`,
+      )
+      .join("")}<button id="playToTasks">${bn ? "নির্বাচিতগুলো কাজ হিসেবে যোগ করুন" : "Add selected as tasks"}</button></section>
+    <section class="card" style="margin-top:20px"><div class="card-head"><h2>${bn ? "কনটেন্ট স্টার্টার" : "Content starters"}</h2>${badge(starters.length + " IDEAS")}</div><p class="muted" style="font-size:12px">Turn an idea into a draft you finish in your own words — then post it yourself.</p>${starters
+      .map(
+        (c) =>
+          `<label class="play-row"><input type="checkbox" data-starter="${esc(c.id)}"><div><strong>${esc(bn ? c.bn : c.en)}</strong></div></label>`,
+      )
+      .join("")}<button id="startersToContent">${bn ? "নির্বাচিতগুলো ড্রাফট করুন" : "Add selected as content drafts"}</button></section>
+    <p class="footnote">Every number here comes from records you or the worker created. Nothing is invented: no fake testimonials, no invented results.</p>`
   );
 }
 function settingsView() {
@@ -677,7 +886,7 @@ function settingsView() {
       "Settings & connections",
       "Credentials stay on the server. No more daily Script Properties or spreadsheet operation.",
     ) +
-    `<div class="grid two"><section class="card"><h2>Targeting controls</h2>${modes()}<form id="settingsForm"><label class="field">Focused countries <small>Hold Cmd/Ctrl to select multiple</small><select multiple name="focusCountries">${S.countries.map((c) => `<option value="${c.code}" ${S.settings.focusCountries.includes(c.code) ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></label><label class="field">Focused prospect types<select multiple name="focusTypes">${["Established business", "New business", "Agency partner", "Freelancer partner", "Public work request"].map((t) => `<option ${S.settings.focusTypes.includes(t) ? "selected" : ""}>${t}</option>`).join("")}</select></label><label class="field">Focused service<select name="niche">${S.niches.map((n) => `<option ${n === S.settings.niche ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label><div class="detail-grid"><label class="field">Daily research target (1–50)<input name="dailyTarget" type="number" min="1" max="50" value="${S.settings.dailyTarget}"></label><label class="field">Send attempts/day (1–20)<input name="dailySendLimit" type="number" min="1" max="20" value="${S.settings.dailySendLimit}"></label></div><label class="field">Adaptive exploration %<input name="adaptiveExplore" type="number" min="1" max="100" value="${S.settings.adaptiveExplore}"></label><button class="primary">Save targeting</button></form></section><div><section class="card"><div class="card-head"><h2>Account connections</h2><button data-act="logout">Sign out</button></div>${[
+    `<div class="grid two"><section class="card"><h2>Targeting controls</h2>${modes()}<form id="settingsForm"><label class="field">Focused countries <small>Hold Cmd/Ctrl to select multiple</small><select multiple name="focusCountries">${S.countries.map((c) => `<option value="${c.code}" ${S.settings.focusCountries.includes(c.code) ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></label><label class="field">Focused prospect types<select multiple name="focusTypes">${["Established business", "New business", "Agency partner", "Freelancer partner", "Public work request"].map((t) => `<option ${S.settings.focusTypes.includes(t) ? "selected" : ""}>${t}</option>`).join("")}</select></label><label class="field">Focused service<select name="niche">${S.niches.map((n) => `<option ${n === S.settings.niche ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label><div class="detail-grid"><label class="field">Daily research target (1–50)<input name="dailyTarget" type="number" min="1" max="50" value="${S.settings.dailyTarget}"></label><label class="field">Send attempts/day (1–20)<input name="dailySendLimit" type="number" min="1" max="20" value="${S.settings.dailySendLimit}"></label></div><label class="field">Adaptive exploration %<input name="adaptiveExplore" type="number" min="1" max="100" value="${S.settings.adaptiveExplore}"></label><div class="detail-grid"><label class="field">Workspace language<select id="setLanguage"><option value="en" ${S.settings.language !== "bn" ? "selected" : ""}>English</option><option value="bn" ${S.settings.language === "bn" ? "selected" : ""}>বাংলা (Bangla)</option></select></label><label class="field">Monthly revenue goal<input id="setGoalRevenue" type="number" min="0" step="any" value="${esc(S.settings.goalRevenue || 0)}"></label><label class="field">Monthly new-customer goal<input id="setGoalCustomers" type="number" min="0" step="1" value="${esc(S.settings.goalCustomers || 0)}"></label></div><div class="divider"></div><h3 style="margin:0 0 8px">Urgent reply alerts</h3><label class="switch"><input type="checkbox" id="setUrgentWatch" ${S.settings.urgentWatch === false ? "" : "checked"}><span><strong>Watch for urgent replies every minute</strong><small>Rules always run on free text: call now, urgent, asap, immediate, deadline, a phone number, and your own keywords.</small></span></label><label class="switch" style="margin-top:10px"><input type="checkbox" id="setWatchAllInbox" ${S.settings.watchAllInbox ? "checked" : ""}><span><strong>Also watch the whole inbox</strong><small>Off by default: only replies to your own sent threads are checked.</small></span></label><label class="switch" style="margin-top:10px"><input type="checkbox" id="setUrgentAi" ${S.settings.urgentAi ? "checked" : ""}><span><strong>Optional AI second opinion (Gemini)</strong><small>Reads only the single matched reply — never the whole mailbox. Requires the free AI connection and AI_FREE_CONFIRMED=true.</small></span></label><label class="field" style="margin-top:12px">Your own urgent keywords <small>Comma separated, max 500 characters</small><textarea id="setUrgentWords" rows="2" maxlength="500" placeholder="quote please, ready to sign, pick up">${esc(S.settings.urgentWords || "")}</textarea></label><button type="button" class="primary" id="saveV6">Save language, alerts & goals</button><div class="divider"></div><button class="primary">Save targeting</button></form></section><div><section class="card"><div class="card-head"><h2>Account connections</h2><button data-act="logout">Sign out</button></div>${[
       ["Tavily", "tavily", "Search + extraction; free-account check"],
       ["Gmail", "gmail", "Owner-approved / opted-in mail and matched replies"],
       ["Gemini", "ai", "Optional anonymous weekly advice"],
@@ -689,7 +898,7 @@ function settingsView() {
       )
       .join(
         "",
-      )}<p class="footnote">Configured does not mean live-verified. Server secrets are entered once during deployment using Wrangler—not embedded in the website.</p></section><section class="card" style="margin-top:20px"><h2>Sending policy</h2><label class="switch"><input type="checkbox" data-toggle="autoSendOptIn" ${S.settings.autoSendOptIn ? "checked" : ""}><span><strong>Auto-send opted-in</strong><small>OFF requires individual message approval.</small></span></label><p class="notes" style="margin-top:20px">Manual business outreach requires a recorded, reviewed permitted basis and individual approval. Public availability alone is not consent. New drafts stop on replies; suppression always wins. Unknown send results are never retried blindly.</p></section></div></div>`
+      )}<p class="footnote">Configured does not mean live-verified. Server secrets are entered once during deployment using Wrangler—not embedded in the website.</p></section><section class="card" style="margin-top:20px"><h2>Global markets — all of them</h2><div class="card-head"><strong>${S.marketCities?.countries || 0} countries · ${S.marketCities?.cities || 0} cities ready</strong>${badge("NOT 249", "green")}</div><p class="muted" style="font-size:13px">You said 249 markets was too small. Every country in the world is listed, and each discovery search names a real city inside it — because “web design France” finds blogs, while “web design Lyon” finds businesses. Your focused list still decides where we spend today's credits; the rest rotates in 24×7.</p><div class="pill-row">${(S.countries || []).slice(0, 5).map((c) => `<span class="pill">${esc(c.name)} · ${S.settings.focusCountries.includes(c.code) ? "focused" : "rotating"}</span>`).join("")}${S.countries.length > 5 ? `<span class="pill">+ ${S.countries.length - 5} more countries</span>` : ""}</div><p class="footnote">Attribution kept: city and map data come from OpenStreetMap contributors and the app's own market list; nothing is scraped from a paid source.</p></section><section class="card" style="margin-top:20px"><h2>Who counts as a prospect</h2><p class="muted" style="font-size:13px">Every kind of business owner — including someone who opened last month and has no website worth the name yet. The five types below are all treated as in-scope; “new business” leads get local-language help in their draft and a lower fit floor, not a lower standard.</p><div class="pill-row">${["Established business", "New business", "Agency partner", "Freelancer partner", "Public work request"].map((t) => `<span class="pill">${esc(t)}</span>`).join("")}</div></section><section class="card" style="margin-top:20px"><h2>Sending policy</h2><label class="switch"><input type="checkbox" data-toggle="autoApprove" ${S.settings.autoApprove !== false ? "checked" : ""}><span><strong>Automatic approval</strong><small>${S.settings.autoApprove !== false ? "ON — drafts that pass every rule are approved for you." : "OFF — you approve each draft."}</small></span></label><label class="switch" style="margin-top:10px"><input type="checkbox" data-toggle="autoSendOptIn" ${S.settings.autoSendOptIn !== false ? "checked" : ""}><span><strong>Automatic sending</strong><small>${S.settings.autoSendOptIn !== false ? "ON — approved messages send inside the daily cap." : "OFF — every message needs approval."}</small></span></label><label class="switch" style="margin-top:10px"><input type="checkbox" data-toggle="emailVerify" ${S.settings.emailVerify !== false ? "checked" : ""}><span><strong>Check addresses</strong><small>Free mail-server check on new records; missing addresses are read from public contact pages.</small></span></label><p class="notes" style="margin-top:20px">Manual business outreach requires a recorded, reviewed permitted basis and individual approval. Public availability alone is not consent. New drafts stop on replies; suppression always wins. Unknown send results are never retried blindly.</p></section></div></div>`
   );
 }
 function render() {
@@ -707,6 +916,7 @@ function render() {
       tasks,
       reports,
       map: bmap,
+      growth: growthView,
       automation: automationView,
       settings: settingsView,
     }[view](),
@@ -722,7 +932,7 @@ function leadModal(id) {
   const l = S.leads.find((x) => x.id === id);
   if (!l) return;
   modal(
-    `<div class="eyebrow">PROSPECT EVIDENCE</div><h2>${esc(l.company)}</h2><div class="row">${badge(l.type)}${badge(l.niche)}</div><div class="detail-grid" style="margin-top:22px">${[
+    `<div class="eyebrow">PROSPECT EVIDENCE</div><h2>${esc(l.company)}</h2><div class="row">${badge(l.type)}${badge(l.niche)}${l.fitScore !== undefined ? `<span class="fit-chip ${l.fitScore < 45 ? "low" : ""}">Fit ${l.fitScore}/100</span>` : ""}${l.urgentAt ? badge("URGENT REPLY", "red") : ""}</div>${l.fitReasons && l.fitReasons.length ? `<p class="notes">Fit reasons: ${esc(l.fitReasons.join(" · "))}</p>` : ""}<div class="detail-grid" style="margin-top:22px">${[
       ["Website", l.website],
       ["Country / market", l.country],
       ["Public email", l.email || "Unknown"],
@@ -731,6 +941,11 @@ function leadModal(id) {
       ["Phone source", l.phoneSource || "Not established"],
       ["Business address", l.address || "Unknown"],
       ["Named contact", l.person || "Unknown"],
+      ["Platform", l.platform || "Not detected"],
+      ["Analytics detected", l.analytics === true ? "Yes (GA4/GTM)" : l.analytics === false ? "No tracking found" : "Not checked"],
+      ["Social profiles", Object.values(l.socials || {}).filter(Boolean).join(", ") || "None found"],
+      ["Hiring signal", l.hiringSignal ? "Site suggests hiring" : "None seen"],
+      ["Site language", l.siteLanguage || "unknown"],
     ]
       .map(
         ([a, b]) =>
@@ -985,6 +1200,238 @@ function bind() {
             "Delivery reconciled",
           )),
     );
+  const selectAll = document.querySelector("#selectAllLeads");
+  const picks = () => [...document.querySelectorAll("[data-pick]")];
+  if (selectAll)
+    selectAll.onchange = () => {
+      picks().forEach((c) => {
+        c.checked = selectAll.checked;
+        if (selectAll.checked) selected.add(c.dataset.pick);
+        else selected.delete(c.dataset.pick);
+      });
+      render();
+    };
+  picks().forEach(
+    (c) =>
+      (c.onchange = () => {
+        if (c.checked) selected.add(c.dataset.pick);
+        else selected.delete(c.dataset.pick);
+        render();
+      }),
+  );
+  const pickPage = document.querySelector("#pickPage");
+  if (pickPage)
+    pickPage.onclick = () => {
+      picks().forEach((c) => selected.add(c.dataset.pick));
+      render();
+    };
+  const pickNone = document.querySelector("#pickNone");
+  if (pickNone)
+    pickNone.onclick = () => {
+      selected.clear();
+      render();
+    };
+  const bulk = (id, op, extra = {}) => {
+    const b = document.querySelector(id);
+    if (b)
+      b.onclick = async () => {
+        if (!selected.size) return toast("Tick at least one row first — or use “Select all shown”.");
+        if (op === "suppress" && !confirm(`Suppress ${selected.size} contact(s)? They will never receive a message again.`)) return;
+        if (op === "approve" && !confirm(`Mark ${selected.size} record(s) approved with the basis you typed?`)) return;
+        const basis = document.querySelector("#bulkBasis")?.value || "";
+        const r = await act(
+          { action: "bulkLeads", op, ids: [...selected], basis },
+          `${selected.size} record(s) updated.`,
+        );
+        if (r) {
+          if (op === "approve" || op === "hold" || op === "unreview") selected.clear();
+          toast(r.results?.filter((x) => x.skipped).length ? "Some rows were skipped (no email or a draft already exists)." : "Bulk action recorded in Activity.");
+        }
+      };
+  };
+  bulk("#bulkApprove", "approve");
+  bulk("#bulkHold", "hold");
+  bulk("#bulkUnreview", "unreview");
+  bulk("#bulkDraft", "draft");
+  bulk("#bulkVerify", "verify");
+  bulk("#bulkSuppress", "suppress");
+  bulk("#bulkRestore", "restore");
+  const dPicks = () => [...document.querySelectorAll("[data-pickdraft]")].filter((c) => !c.disabled);
+  dPicks().forEach(
+    (c) =>
+      (c.onchange = () => {
+        if (c.checked) draftPicks.add(c.dataset.pickdraft);
+        else draftPicks.delete(c.dataset.pickdraft);
+        render();
+      }),
+  );
+  const allD = document.querySelector("#pickAllDrafts");
+  if (allD)
+    allD.onclick = () => {
+      dPicks().forEach((c) => draftPicks.add(c.dataset.pickdraft));
+      render();
+    };
+  const noD = document.querySelector("#pickNoDrafts");
+  if (noD)
+    noD.onclick = () => {
+      draftPicks.clear();
+      render();
+    };
+  const appBulk = document.querySelector("#approveBulk");
+  if (appBulk)
+    appBulk.onclick = async () => {
+      const ids = [...draftPicks];
+      if (!ids.length) return toast("Tick the cards you want approved — each keeps its own recorded basis.");
+      if (!confirm(`Approve ${ids.length} message(s)? Each one goes out under the contact basis already stored on that lead.`)) return;
+      const r = await act({ action: "approveBulk", ids }, "Messages approved.");
+      if (r) {
+        draftPicks.clear();
+        toast(`${r.approved || 0} approved${r.skipped?.length ? `, ${r.skipped.length} skipped (check Activity)` : ""}. Send them from here or let the worker run.`);
+      }
+    };
+  const ts = document.querySelector("#taskSort");
+  if (ts)
+    ts.onchange = () => {
+      taskSort = ts.value;
+      render();
+    };
+  const ms = document.querySelector("#mailSort");
+  if (ms)
+    ms.onchange = () => {
+      mailSort = ms.value;
+      render();
+    };
+  const ds = document.querySelector("#draftSort");
+  if (ds)
+    ds.onchange = () => {
+      draftSort = ds.value;
+      render();
+    };
+  const tPicks = () => [...document.querySelectorAll("[data-picktask]")];
+  tPicks().forEach(
+    (c) =>
+      (c.onchange = () => {
+        if (c.checked) taskPicks.add(c.dataset.picktask);
+        else taskPicks.delete(c.dataset.picktask);
+        render();
+      }),
+  );
+  const tAll = document.querySelector("#taskSelectAll");
+  if (tAll)
+    tAll.onchange = () => {
+      tPicks().forEach((c) => {
+        c.checked = tAll.checked;
+        if (tAll.checked) taskPicks.add(c.dataset.picktask);
+        else taskPicks.delete(c.dataset.picktask);
+      });
+      render();
+    };
+  const tPickAll = document.querySelector("#taskPickAll");
+  if (tPickAll)
+    tPickAll.onclick = () => {
+      tPicks().forEach((c) => taskPicks.add(c.dataset.picktask));
+      render();
+    };
+  const tPickNone = document.querySelector("#taskPickNone");
+  if (tPickNone)
+    tPickNone.onclick = () => {
+      taskPicks.clear();
+      render();
+    };
+  const taskBulk = (id, op) => {
+    const b = document.querySelector(id);
+    if (b)
+      b.onclick = async () => {
+        if (!taskPicks.size) return toast("Tick at least one task first — or use “Select all shown”.");
+        const r = await act({ action: "bulkTasks", op, ids: [...taskPicks] }, "Tasks updated.");
+        if (r) {
+          taskPicks.clear();
+          toast(`${r.count || 0} task(s) ${op === "complete" ? "marked done" : "reopened"}.`);
+        }
+      };
+  };
+  taskBulk("#taskBulkDone", "complete");
+  taskBulk("#taskBulkReopen", "reopen");
+  document.querySelectorAll("[data-reopentask]").forEach(
+    (b) =>
+      (b.onclick = () =>
+        act({ action: "task", id: b.dataset.reopentask, value: { status: "OPEN" } }, "Task reopened.")),
+  );
+  const sortSelect = document.querySelector("#sortBy");
+  if (sortSelect)
+    sortSelect.onchange = () => {
+      sortBy = sortSelect.value;
+      render();
+    };
+  document.querySelectorAll("[data-urgent]").forEach(
+    (b) =>
+      (b.onclick = () =>
+        act(
+          { action: "urgentHandled", id: b.dataset.urgent },
+          "Marked handled — the task is closed too.",
+        )),
+  );
+  const saveV6 = document.querySelector("#saveV6");
+  if (saveV6)
+    saveV6.onclick = async () => {
+      const value = {
+        language: document.querySelector("#setLanguage").value,
+        urgentWords: document.querySelector("#setUrgentWords").value,
+        urgentWatch: document.querySelector("#setUrgentWatch").checked,
+        urgentAi: document.querySelector("#setUrgentAi").checked,
+        watchAllInbox: document.querySelector("#setWatchAllInbox").checked,
+        goalRevenue: Number(document.querySelector("#setGoalRevenue").value || 0),
+        goalCustomers: Number(document.querySelector("#setGoalCustomers").value || 0),
+      };
+      if (value.urgentAi && !S.connections.ai) {
+        toast("Connect Gemini first, or leave the AI second opinion off — rules still run.");
+        return;
+      }
+      const r = await act({ action: "settings", value }, "Language, alerts and goals saved.");
+      if (r) render();
+    };
+  const saveGoals = document.querySelector("#saveGoals");
+  if (saveGoals)
+    saveGoals.onclick = () =>
+      act(
+        {
+          action: "settings",
+          value: {
+            goalRevenue: Number(document.querySelector("#goalRevenue").value || 0),
+            goalCustomers: Number(document.querySelector("#goalCustomers").value || 0),
+          },
+        },
+        "Goals saved — pace updates from your own records.",
+      );
+  const makePlan = document.querySelector("#makePlan");
+  if (makePlan)
+    makePlan.onclick = async () => {
+      const answers = {
+        offer: document.querySelector("#lpOffer").value,
+        audience: document.querySelector("#lpAudience").value,
+        price: document.querySelector("#lpPrice").value,
+        city: document.querySelector("#lpCity").value,
+        hours: document.querySelector("#lpHours").value,
+      };
+      const r = await act({ action: "launchPlan", answers }, "30-day plan created on your Work board.");
+      if (r) toast(r.plan.length + " dated tasks added — open Work & follow-ups.");
+    };
+  const playToTasks = document.querySelector("#playToTasks");
+  if (playToTasks)
+    playToTasks.onclick = async () => {
+      const ids = [...document.querySelectorAll("[data-play]")].filter((x) => x.checked).map((x) => x.dataset.play);
+      if (!ids.length) return toast("Tick at least one step first.");
+      const r = await act({ action: "playbookToTasks", ids }, "Steps added as tasks.");
+      if (r) toast(r.added + " step(s) added to your Work board.");
+    };
+  const startersBtn = document.querySelector("#startersToContent");
+  if (startersBtn)
+    startersBtn.onclick = async () => {
+      const ids = [...document.querySelectorAll("[data-starter]")].filter((x) => x.checked).map((x) => x.dataset.starter);
+      if (!ids.length) return toast("Tick at least one idea first.");
+      const r = await act({ action: "startersToContent", ids }, "Ideas added as content drafts.");
+      if (r) toast(r.added + " draft(s) added — finish them in your own words in Marketing.");
+    };
   document
     .querySelectorAll("[data-nav]")
     .forEach((b) => (b.onclick = () => (location.hash = b.dataset.nav)));
@@ -1004,25 +1451,36 @@ function bind() {
   document.querySelectorAll("[data-toggle]").forEach(
     (b) =>
       (b.onchange = async () => {
+        const key = b.dataset.toggle;
+        const risky = ["autoSendOptIn", "autoApprove"].includes(key);
         if (
+          risky &&
           b.checked &&
           !confirm(
-            "Enable automatic sending ONLY for recorded opted-in contacts, within caps?",
+            "Turn this back on? The studio will approve/send on its own rules again — cap " +
+              (S.settings.dailySendLimit || 5) +
+              "/day, never a held, replied or suppressed contact.",
           )
         ) {
           b.checked = false;
           return;
         }
-        await act(
-          { action: "settings", value: { [b.dataset.toggle]: b.checked } },
-          "Sending policy updated",
-        );
+        if (key === "notifyAll")
+          toast(b.checked ? "All alerts on — one message per event, each with its reason." : "Only urgent replies and errors will alert now.");
+        await act({ action: "settings", value: { [key]: b.checked } }, "Setting saved");
       }),
   );
   document.querySelectorAll("[data-act]").forEach(
     (b) =>
       (b.onclick = async () => {
         const a = b.dataset.act;
+        if (a === "lang") {
+          const next = lang() === "bn" ? "en" : "bn";
+          b.disabled = true;
+          await act({ action: "settings", value: { language: next } }, next === "bn" ? "ভাষা: বাংলা" : "Language: English");
+          b.disabled = false;
+          return;
+        }
         if (a === "newTask") return taskModal();
         if (a === "newCampaign") return campaignModal();
         if (a === "newInvoice") return invoiceModal();
@@ -1032,7 +1490,10 @@ function bind() {
             { action: "settings", value: { paused: !S.settings.paused } },
             "Worker state updated",
           );
-        else if (a === "followup" || a === "invoiceReminders") {
+        else if (a === "urgentCheck") {
+          const r = await act({ action: "urgentCheck" }, "Urgent check finished.");
+          if (r) toast(r.skipped === "GMAIL_NOT_CONNECTED" ? "Connect Gmail first — the watch reads replies from your inbox." : r.skipped === "URGENT_WATCH_OFF" ? "The urgent watch switch is off in Settings." : `${r.flagged || 0} urgent/high reply(ies) flagged just now.`);
+        } else if (a === "followup" || a === "invoiceReminders") {
           const r = await act({ action: a }, "Run finished.");
           if (r && r.created !== undefined)
             toast(

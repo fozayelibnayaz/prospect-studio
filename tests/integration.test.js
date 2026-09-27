@@ -11,6 +11,11 @@ async function setup({
   mailFailure = false,
   identity = "owner@example.com",
   replies = [],
+  telegram = false,
+  gemini = false,
+  pse = false,
+  osm = false,
+  monthCredits = 0,
 } = {}) {
   let calls = [];
   const mf = new Miniflare({
@@ -28,6 +33,13 @@ async function setup({
       ENCRYPTION_KEY: secret,
       TAVILY_API_KEY: "test-key",
       TAVILY_PAYGO_DISABLED_CONFIRMED: "true",
+      ...(telegram
+        ? { TELEGRAM_BOT_TOKEN: "bot-token", TELEGRAM_CHAT_ID: "12345" }
+        : {}),
+      ...(gemini
+        ? { GEMINI_API_KEY: "gem", GEMINI_MODEL: "gemini-test", AI_FREE_CONFIRMED: "true" }
+        : {}),
+      ...(pse ? { GOOGLE_PSE_KEY: "pse-key", GOOGLE_PSE_CX: "pse-cx" } : {}),
     },
     outboundService: async (r) => {
       calls.push(r.url);
@@ -62,6 +74,40 @@ async function setup({
           })),
           failed_results: [],
         });
+      }
+      if (u.startsWith("https://api.telegram.org/bot"))
+        return send({ ok: true, result: { message_id: 1 } });
+      if (u.includes("generativelanguage.googleapis.com")) {
+        const body = await r.json();
+        const prompt = body.contents?.[0]?.parts?.[0]?.text || "";
+        const text = /Translate/i.test(prompt)
+          ? "অনুবাদিত লেখা"
+          : /Classify/i.test(prompt)
+            ? "URGENT\nThey asked for a call today."
+            : "AI text";
+        return send({ candidates: [{ content: { parts: [{ text }] } }] });
+      }
+      if (u === "https://overpass-api.de/api/interpreter") {
+        if (!osm) throw Error("Unexpected overpass call");
+        return send({
+          elements: [
+            {
+              type: "node",
+              tags: {
+                name: "Leeds Bakery",
+                website: "https://leedsbakery.co.uk",
+                phone: "+44 113 555 0000",
+                "addr:street": "9 Kirkgate",
+                "addr:city": "Leeds",
+                shop: "bakery",
+              },
+            },
+          ],
+        });
+      }
+      if (u.startsWith("https://www.googleapis.com/customsearch/v1")) {
+        if (!pse) throw Error("Unexpected PSE call");
+        return send({ items: [{ link: "https://pse-found.co.uk/", title: "PSE found business" }] });
       }
       if (u === "https://openidconnect.googleapis.com/v1/userinfo")
         return send({ email: identity, email_verified: true });
@@ -125,6 +171,8 @@ async function setup({
       .run();
   }
   await put("settings", "main", { paused: false, autoSendOptIn: false });
+  if (monthCredits)
+    await put("month", new Date().toISOString().slice(0, 7), { credits: monthCredits });
   async function action(body) {
     const r = await mf.dispatchFetch(origin + "/api/action", {
       method: "POST",
@@ -144,7 +192,13 @@ async function setup({
       .first();
     return r && JSON.parse(r.data);
   }
-  return { mf, db, calls, put, get, action };
+  async function state() {
+    const r = await mf.dispatchFetch(origin + "/api/state", {
+      headers: { Cookie: "ps_session=" + session },
+    });
+    return { status: r.status, body: await r.json() };
+  }
+  return { mf, db, calls, put, get, action, state };
 }
 async function mailFixture(h) {
   const iv = crypto.randomBytes(12),
@@ -248,7 +302,15 @@ test("real D1 adapter: global pause and suppression stop sends", async () => {
     await h.action({ action: "settings", value: { paused: false } });
     await h.action({ action: "lead", id: "l1", value: { suppressed: true } });
     await h.action({ action: "send" });
-    assert.equal(h.calls.length, 0);
+    assert.equal(
+      h.calls.filter((x) => x.endsWith("/messages/send")).length,
+      0,
+      "suppression stops the send itself (delivery notices may still be read)",
+    );
+    assert.ok(
+      !h.calls.some((x) => x.includes("messages/send")),
+      "no message was sent while suppressed",
+    );
   } finally {
     await h.mf.dispose();
   }
@@ -1030,6 +1092,510 @@ test("pause window blocks sending, follow-ups and reminders but not discovery", 
     const before = h.calls.length;
     const disc = await h.action({ action: "discover" });
     assert.equal(disc.status, 200, "discovery still runs during a pause window");
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("urgent watch: a reply in my thread flags URGENT, notifies and closes on handled", async () => {
+  const h = await setup({
+    telegram: true,
+    gemini: true,
+    replies: [
+      {
+        id: "m-urgent",
+        threadId: "thread-1",
+        from: "Priya <priya@example.com>",
+        subject: "Re: tracking help",
+        body: "Please call now — we want to sign this week. Reach me on +44 7700 900123.",
+      },
+    ],
+  });
+  try {
+    await mailFixture(h);
+    await h.put("mail", "sent-1", {
+      id: "sent-1",
+      direction: "OUT",
+      leadId: "l1",
+      threadId: "thread-1",
+      at: new Date().toISOString(),
+      subject: "Test outreach",
+      body: "hello",
+    });
+    const r = await h.action({ action: "urgentCheck" });
+    assert.equal(r.status, 200, JSON.stringify(r));
+    assert.equal(r.body.flagged, 1);
+    const rec = await h.get("urgent", "m-urgent");
+    assert.equal(rec.tier, "URGENT", JSON.stringify(rec));
+    assert.equal(rec.handled, false);
+    assert.equal(rec.leadId, "l1");
+    assert.ok(rec.hits.some((x) => /call now/.test(x)));
+    assert.ok(h.calls.some((x) => x.startsWith("https://api.telegram.org/bot")));
+    const task = await h.get("tasks", "urgent-m-urgent");
+    assert.equal(task.status, "OPEN");
+    assert.match(task.title, /Call back/);
+    assert.equal((await h.get("leads", "l1")).urgentTier, "URGENT");
+    const done = await h.action({ action: "urgentHandled", id: "m-urgent" });
+    assert.equal(done.status, 200);
+    assert.equal((await h.get("urgent", "m-urgent")).handled, true);
+    assert.equal((await h.get("tasks", "urgent-m-urgent")).status, "DONE");
+    assert.equal((await h.get("leads", "l1")).urgentAt, null);
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("urgent watch ignores ordinary replies, respects the switch and never watches the whole inbox by default", async () => {
+  const h = await setup({
+    replies: [
+      { id: "m-plain", threadId: "thread-1", from: "Test business <test@example.com>", subject: "Re: hi", body: "Thanks, noted. No rush." },
+      { id: "m-other", threadId: "thread-9", from: "b@example.com", subject: "Call now", body: "Please call now" },
+      { id: "m-forward", threadId: "thread-1", from: "Accountant <books@example.org>", subject: "Fwd: your note", body: "Passing this to our owner." },
+    ],
+  });
+  try {
+    await mailFixture(h);
+    await h.put("mail", "sent-1", {
+      id: "sent-1",
+      direction: "OUT",
+      leadId: "l1",
+      threadId: "thread-1",
+      at: new Date().toISOString(),
+      subject: "Test outreach",
+      body: "hello",
+    });
+    let r = await h.action({ action: "urgentCheck" });
+    assert.equal(r.body.flagged, 1, "only the new-sender thread is flagged");
+    assert.equal((await h.get("urgent", "m-plain")), null, "ordinary replies stay out of the alert list");
+    assert.equal((await h.get("inboxlog", "m-plain")).class, "NORMAL", "but every message is stored for the weekly skim");
+    assert.equal((await h.get("inboxlog", "m-forward")).class, "FORWARD");
+    assert.equal(await h.get("urgent", "m-other"), null, "threads that are not ours are ignored");
+    assert.ok(r.body.stored >= 2);
+    await h.action({ action: "settings", value: { watchAllInbox: true } });
+    r = await h.action({ action: "urgentCheck" });
+    assert.equal(r.body.flagged, 1);
+    assert.equal((await h.get("urgent", "m-other")).tier, "URGENT");
+    assert.equal((await h.get("urgent", "m-other")).class, "INTERESTED");
+    await h.action({ action: "settings", value: { urgentWatch: false } });
+    assert.equal((await h.action({ action: "urgentCheck" })).body.skipped, "URGENT_WATCH_OFF");
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("urgent watch needs Gmail and the AI second opinion stays behind its own switch", async () => {
+  const h = await setup({ gemini: true, telegram: true });
+  try {
+    assert.equal((await h.action({ action: "urgentCheck" })).body.skipped, "GMAIL_NOT_CONNECTED");
+    const ai = await h.action({ action: "translate", text: "Hello there", target: "bn" });
+    assert.equal(ai.status, 200);
+    assert.match(ai.body.text, /[\u0980-\u09FF]/);
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("language: per-lead Bangla draft, global default and lead override validation", async () => {
+  const h = await setup();
+  try {
+    await h.put("leads", "bn1", {
+      id: "bn1",
+      company: "ঢাকা ট্রেডার্স",
+      email: "biz@example.com",
+      consent: "OPT_IN",
+      contactEvidence: "fixture",
+      status: "APPROVED",
+      stage: "NEW",
+      language: "bn",
+    });
+    await h.action({ action: "settings", value: { language: "bn" } });
+    let r = await h.action({ action: "draft", id: "bn1", kind: "outreach" });
+    assert.equal(r.status, 200, JSON.stringify(r));
+    const draft = Object.values(
+      (await h.db.prepare("SELECT data FROM objects WHERE kind='drafts'").all()).results,
+    )
+      .map((x) => JSON.parse(x.data))
+      .find((x) => x.leadId === "bn1");
+    assert.equal(draft.language, "bn");
+    assert.ok(/[\u0980-\u09FF]/.test(draft.body));
+    assert.ok(draft.subject.length > 0);
+    assert.equal(
+      (await h.action({ action: "leadLanguage", id: "bn1", language: "en" })).body.language,
+      "en",
+    );
+    assert.equal((await h.action({ action: "leadLanguage", id: "bn1", language: "de" })).status, 400);
+    assert.equal((await h.action({ action: "settings", value: { language: "fr" } })).status, 400);
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("growth actions: launch plan, playbook tasks, content starters and health check", async () => {
+  const h = await setup();
+  try {
+    const plan = await h.action({
+      action: "launchPlan",
+      answers: { offer: "websites", audience: "cafes", price: "300 USD", city: "Dhaka", hours: "12" },
+    });
+    assert.equal(plan.status, 200, JSON.stringify(plan.body));
+    assert.ok(plan.body.plan.length >= 10);
+    const task = await h.get("tasks", plan.body.plan[0].id);
+    assert.equal(task.status, "OPEN");
+    assert.equal(task.type, plan.body.plan[0].type);
+
+    const play = await h.action({ action: "playbookToTasks", ids: ["p1", "p2"] });
+    assert.equal(play.body.added, 2);
+    const starter = await h.action({ action: "startersToContent", ids: ["c1"] });
+    assert.equal(starter.body.added, 1);
+    const content = Object.values(
+      (await h.db.prepare("SELECT data FROM objects WHERE kind='content'").all()).results,
+    ).map((x) => JSON.parse(x.data));
+    assert.equal(content.length, 1);
+    assert.equal(content[0].status, "DRAFT");
+
+    const health = await h.action({ action: "health", goals: 1 });
+    assert.equal(health.status, 200, JSON.stringify(health.body));
+    assert.ok(Array.isArray(health.body.items) && health.body.items.length > 0);
+    assert.ok(health.body.last);
+    const state = await h.mf.dispatchFetch(origin + "/api/state", {
+      headers: { Cookie: "ps_session=" + session },
+    });
+    const payload = await state.json();
+    assert.ok(payload.playbook.length >= 10);
+    assert.ok(payload.contentStarters.length >= 5);
+    assert.equal(payload.settings.language, "en");
+    assert.ok("goals" in payload);
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("fallback chain: spent budget switches discovery to Google PSE and then to OpenStreetMap", async () => {
+  const pseH = await setup({ pse: true, monthCredits: 901, telegram: true });
+  try {
+    const r = await pseH.action({ action: "discover" });
+    assert.equal(r.status, 200, JSON.stringify(r));
+    assert.ok(pseH.calls.some((x) => x.startsWith("https://www.googleapis.com/customsearch/v1")));
+    assert.ok(!pseH.calls.some((x) => x.endsWith("/api.tavily.com/search") || x.endsWith("/search")));
+    const mode = await pseH.get("runtime", "discoveryMode");
+    assert.equal(mode.mode, "PSE");
+    assert.match(mode.reason, /900 credits/);
+    assert.ok(pseH.calls.some((x) => x.startsWith("https://api.telegram.org/bot")));
+  } finally {
+    await pseH.mf.dispose();
+  }
+  const osmH = await setup({ osm: true, monthCredits: 950 });
+  try {
+    const r = await osmH.action({ action: "discover" });
+    assert.equal(r.status, 200, JSON.stringify(r));
+    assert.ok(osmH.calls.includes("https://overpass-api.de/api/interpreter"));
+    const leads = (await osmH.db.prepare("SELECT data FROM objects WHERE kind='leads'").all()).results.map(
+      (x) => JSON.parse(x.data),
+    );
+    assert.equal(leads.length, 1);
+    assert.equal(leads[0].company, "Leeds Bakery");
+    assert.match(leads[0].evidence, /OpenStreetMap/);
+    assert.equal(leads[0].status, "UNREVIEWED");
+    assert.ok(leads[0].fitScore >= 0 && leads[0].fitScore <= 100);
+    assert.equal((await osmH.get("runtime", "discoveryMode")).mode, "OSM");
+  } finally {
+    await osmH.mf.dispose();
+  }
+});
+
+test("research enrichment stores platform, analytics, socials and a transparent fit score", async () => {
+  const h = await setup();
+  try {
+    const r = await h.action({ action: "discover" });
+    assert.equal(r.status, 200, JSON.stringify(r));
+    await h.action({ action: "discover" });
+    const leads = (await h.db.prepare("SELECT data FROM objects WHERE kind='leads'").all()).results.map(
+      (x) => JSON.parse(x.data),
+    );
+    assert.equal(leads.length, 1);
+    assert.equal(leads[0].platform, "unknown");
+    assert.ok(Array.isArray(leads[0].fitReasons));
+    assert.ok(Number.isInteger(leads[0].fitScore));
+    assert.equal(typeof leads[0].siteLanguage, "string");
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+test("new settings round-trip and are bounded", async () => {
+  const h = await setup();
+  try {
+    const ok = await h.action({
+      action: "settings",
+      value: {
+        language: "bn",
+        urgentWords: "ready to sign",
+        urgentAi: true,
+        watchAllInbox: true,
+        goalRevenue: 25000,
+        goalCustomers: 4,
+      },
+    });
+    assert.equal(ok.status, 200, JSON.stringify(ok));
+    const s = await h.get("settings", "main");
+    assert.equal(s.language, "bn");
+    assert.equal(s.goalRevenue, 25000);
+    assert.equal(s.urgentAi, true);
+    assert.equal(s.watchAllInbox, true);
+    assert.equal(
+      (await h.action({ action: "settings", value: { urgentWords: "x".repeat(501) } })).status,
+      400,
+    );
+    assert.equal(
+      (await h.action({ action: "settings", value: { goalRevenue: -5 } })).status,
+      400,
+    );
+    assert.equal(await h.get("urgent", "nothing"), null);
+    const list = await h.action({ action: "urgent" });
+    assert.deepEqual(list.body.urgent, []);
+  } finally {
+    await h.mf.dispose();
+  }
+});
+
+/* ============================ v0.8 owner feedback ======================== */
+test("v0.8: bulk review on every list, and approval needs a recorded basis", async () => {
+  const h = await setup();
+  try {
+    for (const i of [1, 2, 3])
+      await h.put("leads", "b" + i, {
+        id: "b" + i,
+        company: "Business " + i,
+        email: "owner" + i + "@example.com",
+        consent: "NONE",
+        contactEvidence: "",
+        status: "UNREVIEWED",
+        stage: "NEW",
+        niche: "Website & WordPress",
+        platform: "wordpress",
+        analytics: false,
+      });
+    let r = await h.action({ action: "bulkLeads", op: "approve", ids: ["b1", "b2", "b3"], basis: "" });
+    assert.equal(r.status, 400, "no basis, no bulk approval");
+    r = await h.action({
+      action: "bulkLeads",
+      op: "approve",
+      ids: ["b1", "b2", "b3"],
+      basis: "Read each public contact page; contact relates to their stated business.",
+    });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    for (const id of ["b1", "b2", "b3"]) {
+      const l = await h.get("leads", id);
+      assert.equal(l.status, "APPROVED");
+      assert.match(l.contactEvidence, /public contact page/);
+    }
+    await h.action({ action: "bulkLeads", op: "hold", ids: ["b2"], basis: "" });
+    assert.equal((await h.get("leads", "b2")).status, "HOLD");
+    await h.action({ action: "bulkLeads", op: "unreview", ids: ["b2"], basis: "" });
+    assert.equal((await h.get("leads", "b2")).status, "UNREVIEWED");
+    r = await h.action({ action: "bulkLeads", op: "draft", ids: ["b1", "b2"], basis: "" });
+    assert.equal(r.status, 200);
+    const drafts = r.body.results.filter((x) => x.draftId);
+    assert.equal(drafts.length, 1, "only the still-approved record gets a draft");
+    const d = await h.get("drafts", drafts[0].draftId);
+    assert.equal(d.status, "DRAFT", "a bulk-created draft is still a draft");
+    assert.match(d.body, /recorded basis|public page|contact page|Would a short, specific example/, JSON.stringify(d.body.slice(0, 120)));
+    await h.action({ action: "bulkLeads", op: "suppress", ids: ["b3"], basis: "" });
+    assert.equal((await h.get("leads", "b3")).suppressed, true);
+    const sup = await h.db.prepare("SELECT data FROM objects WHERE kind='suppression'").all();
+    assert.ok(
+      sup.results.some((r) => JSON.parse(r.data).email === "owner3@example.com"),
+      "suppression list written by the bulk action",
+    );
+    await h.action({ action: "bulkLeads", op: "restore", ids: ["b3"], basis: "" });
+    assert.equal((await h.get("leads", "b3")).suppressed, false);
+  } finally {
+    await h.mf.dispose();
+  }
+});
+test("v0.8: bulk approval of drafts skips the ones without a recorded basis", async () => {
+  const h = await setup();
+  try {
+    await h.put("leads", "g1", { id: "g1", company: "Good", email: "a@example.com", status: "APPROVED", stage: "NEW", contactEvidence: "Owner read the public contact page before approving." });
+    await h.put("leads", "g2", { id: "g2", company: "Thin", email: "b@example.com", status: "APPROVED", stage: "NEW", contactEvidence: "" });
+    await h.put("leads", "g3", { id: "g3", company: "Gone", email: "c@example.com", status: "APPROVED", stage: "NEW", contactEvidence: "Basis recorded properly here.", suppressed: true });
+    for (const [did, lid] of [["db1", "g1"], ["db2", "g2"], ["db3", "g3"]])
+      await h.put("drafts", did, { id: did, leadId: lid, kind: "outreach", status: "DRAFT", subject: "s", body: "b" });
+    const r = await h.action({ action: "approveBulk", ids: ["db1", "db2", "db3"] });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.approved, 1);
+    assert.equal((await h.get("drafts", "db1")).status, "APPROVED");
+    assert.equal((await h.get("drafts", "db1")).approvedBy, "OWNER_BULK");
+    assert.equal((await h.get("drafts", "db2")).status, "DRAFT");
+    assert.equal((await h.get("drafts", "db3")).status, "DRAFT");
+    assert.deepEqual(r.body.skipped.map((x) => x.why).sort(), ["NO_RECORDED_BASIS", "SUPPRESSED"]);
+  } finally {
+    await h.mf.dispose();
+  }
+});
+test("v0.8: address checking says what it proved, and stores every verdict", async () => {
+  const h = await setup();
+  try {
+    await h.put("leads", "e1", { id: "e1", company: "Has mail", email: "owner@example.com", status: "UNREVIEWED", stage: "NEW" });
+    await h.put("leads", "e2", { id: "e2", company: "Bad syntax", email: "not-an-email", status: "UNREVIEWED", stage: "NEW" });
+    await h.put("leads", "e3", { id: "e3", company: "No address", status: "UNREVIEWED", stage: "NEW" });
+    const r = await h.action({ action: "verifyEmails", limit: 10 });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal((await h.get("leads", "e2")).emailStatus, "INVALID_SYNTAX");
+    assert.equal((await h.get("leads", "e3")).emailStatus, undefined, "no address is never given a verdict");
+    assert.ok(
+      ["MX_OK", "MX_OK_ROLE", "NO_MAIL_SERVER", "SYNTAX_OK"].includes((await h.get("leads", "e1")).emailStatus),
+      "e1: " + (await h.get("leads", "e1")).emailStatus,
+    );
+    assert.ok((await h.get("leads", "e1")).emailCheckedAt, "the check records when it happened");
+    const vr = await h.action({ action: "verifyEmails", limit: 5 });
+    assert.equal(vr.body.checked, 0, "already-checked rows are not re-queried");
+    const st = await h.action({ action: "emailStatuses" });
+    assert.equal(st.status, 200);
+    assert.ok(st.body.labels.MX_OK.includes("not a delivery proof"), "labels stay honest");
+    assert.ok(
+      Object.keys(st.body.counts).some((k) => ["MX_OK", "MX_OK_ROLE", "NO_MAIL_SERVER", "SYNTAX_OK", "INVALID_SYNTAX"].includes(k)),
+      "counts: " + JSON.stringify(st.body.counts),
+    );
+    assert.ok(st.body.counts.INVALID_SYNTAX >= 1, "a broken address is counted, not hidden");
+    await h.put("drafts", "de2", { id: "de2", leadId: "e2", kind: "outreach", status: "APPROVED", approvedAt: new Date().toISOString(), approvedEmail: "not-an-email", subject: "s", body: "b" });
+    await h.put("leads", "e2b", { id: "e2b", company: "Bad domain", email: "owner@no-mail-here.invalid", emailStatus: "NO_MAIL_SERVER", consent: "BUSINESS_REVIEWED", contactEvidence: "Owner read the public contact page.", status: "APPROVED", stage: "NEW" });
+    await h.put("drafts", "de2b", { id: "de2b", leadId: "e2b", kind: "outreach", status: "APPROVED", approvedAt: new Date().toISOString(), approvedEmail: "owner@no-mail-here.invalid", subject: "s", body: "b" });
+    const before = h.calls.length;
+    await h.action({ action: "send" });
+    assert.equal(
+      h.calls.slice(before).filter((x) => x.includes("messages/send")).length,
+      0,
+      "an address the checker proved wrong is never sent to",
+    );
+    const bulk = await h.action({ action: "bulkLeads", op: "verify", ids: ["e1", "e3"], basis: "" });
+    assert.equal(bulk.status, 200);
+    assert.ok(bulk.body.results.some((x) => x.skipped === "NO_EMAIL"), "a row with no address reports why it was skipped");
+  } finally {
+    await h.mf.dispose();
+  }
+});
+test("v0.8: every alert case has its own switch, and each alert can explain itself", async () => {
+  const h = await setup();
+  try {
+    const p = await h.action({ action: "notifyPreview" });
+    assert.equal(p.status, 200);
+    assert.ok(p.body.keys.length >= 10, "one switch per case, got " + p.body.keys.length);
+    assert.ok(p.body.keys.every((k) => k.on), "defaults are on");
+    assert.match(p.body.example, /matched/, "the example shows where the word match came from");
+    let r = await h.action({ action: "settings", value: { notifyContent: false } });
+    assert.equal(r.status, 200);
+    const p2 = await h.action({ action: "notifyPreview" });
+    assert.equal(p2.body.keys.find((k) => k.key === "notifyContent").on, false);
+    assert.equal(p2.body.master, true);
+    r = await h.action({ action: "settings", value: { notifyAll: false } });
+    assert.equal((await h.action({ action: "notifyPreview" })).body.master, false);
+    const t = await h.action({ action: "testNotify" });
+    assert.equal(t.status, 200);
+    assert.match(t.body.text, /test alert/i);
+    assert.equal(t.body.sent, false, "no Telegram secret in a test environment — reported, not pretended");
+    await h.action({ action: "settings", value: { notifyAll: true } });
+    await h.action({ action: "settings", value: { notifyContent: true } });
+  } finally {
+    await h.mf.dispose();
+  }
+});
+test("v0.8: the state carries markets, address counts and the weekly skim", async () => {
+  const h = await setup();
+  try {
+    await h.put("leads", "m1", { id: "m1", company: "Market test", email: "a@example.com", status: "UNREVIEWED", stage: "NEW", fitScore: 71, cityLabel: "Khulna", country: "Bangladesh" });
+    const s = await h.state();
+    assert.equal(s.status, 200, JSON.stringify(s.body).slice(0, 200));
+    assert.ok(s.body.marketCities.countries >= 120, "countries " + s.body.marketCities.countries);
+    assert.ok(s.body.marketCities.cities >= 500, "cities " + s.body.marketCities.cities);
+    assert.ok(s.body.emailCounts && typeof s.body.emailCounts === "object");
+    assert.ok(s.body.emailLabels.MX_OK);
+    assert.ok(Array.isArray(s.body.inbox));
+    assert.ok(Array.isArray(s.body.inboxGaps));
+    assert.ok(Array.isArray(s.body.notifyKeys) && s.body.notifyKeys[0].label);
+    await h.put("inboxlog", "i1", { id: "i1", at: new Date().toISOString(), class: "NORMAL", subject: "Showroom opening", snippet: "our showroom opens soon and we need the showroom booking page updated", body: "our showroom opens soon and we need the showroom booking page updated" });
+    const s2 = await h.state();
+    assert.ok(s2.body.inboxGaps.some((g) => g.word === "showroom"), "a repeated phrase the keyword list is missing surfaces for the weekly skim");
+  } finally {
+    await h.mf.dispose();
+  }
+});
+test("v0.8: automatic approval is ON, and turning it off puts every draft back in the owner's hands", async () => {
+  const h = await setup();
+  try {
+    await mailFixture(h);
+    /* the fixture stores autoSendOptIn:false, so switch the real defaults on first */
+    await h.action({ action: "settings", value: { autoApprove: true, autoSendOptIn: true } });
+    const s = await h.state();
+    assert.equal(s.body.settings.autoApprove, true);
+    assert.equal(s.body.settings.autoSendOptIn, true);
+    assert.equal(s.body.settings.emailVerify, true);
+    await h.action({ action: "settings", value: { autoApprove: false, autoSendOptIn: false } });
+    const off = await h.state();
+    assert.equal(off.body.settings.autoApprove, false);
+    assert.equal(off.body.settings.autoSendOptIn, false);
+    await h.put("leads", "z1", { id: "z1", company: "Fresh", email: "fresh@example.com", consent: "BUSINESS_REVIEWED", contactEvidence: "Owner read the public contact page; contact relates to the stated business.", status: "APPROVED", stage: "NEW" });
+    await h.action({ action: "bulkLeads", op: "draft", ids: ["z1"], basis: "" });
+    const draftRows = await h.db.prepare("SELECT data FROM objects WHERE kind='drafts'").all();
+    const draft = draftRows.results.map((r) => JSON.parse(r.data)).find((d) => d.leadId === "z1");
+    assert.ok(draft);
+    assert.equal(draft.status, "DRAFT", "auto-approve off means the draft waits");
+    const before = h.calls.length;
+    await h.action({ action: "send" });
+    const sentFresh = h.calls.slice(before).filter((x) => x.includes("messages/send"));
+    assert.equal(sentFresh.length, 1, "with auto-send OFF the queue stops at anything the owner has not approved");
+    assert.ok(sentFresh[0].includes("messages/send"));
+    const freshDraft = (await h.db.prepare("SELECT data FROM objects WHERE kind='drafts'").all()).results
+      .map((r) => JSON.parse(r.data))
+      .find((d) => d.id === draft.id);
+    assert.equal(freshDraft.status, "DRAFT", "and the un-approved draft is still sitting in the queue");
+    await h.action({ action: "settings", value: { autoApprove: true, autoSendOptIn: true } });
+    await h.action({ action: "approve", id: draft.id });
+    await h.action({ action: "send" });
+    assert.ok(h.calls.some((x) => x.includes("messages/send")), "with both back on, an approved message sends again");
+  } finally {
+    await h.mf.dispose();
+  }
+});
+test("v0.8: a public version endpoint proves what is deployed here", async () => {
+  const h = await setup();
+  try {
+    const r = await h.mf.dispatchFetch("http://app.test/api/version");
+    assert.equal(r.status, 200);
+    const b = await r.json();
+    assert.equal(b.version, "0.8.0");
+    assert.ok(b.features.includes("auto-approve-default-on"));
+    assert.ok(b.features.includes("bulk-review-with-basis"));
+    assert.ok(b.features.includes("mx-address-check"));
+    assert.ok(b.features.includes("global-markets"));
+    assert.ok(b.markets.countries >= 120 && b.markets.cities >= 500);
+    assert.equal("settings" in b, false, "the public endpoint carries no private data");
+    assert.ok(!JSON.stringify(b).includes("@"), "no addresses leak from the public endpoint");
+  } finally {
+    await h.mf.dispose();
+  }
+});
+test("v0.8: tasks can be selected in bulk and closed or reopened", async () => {
+  const h = await setup();
+  try {
+    for (const i of [1, 2, 3])
+      await h.put("tasks", "t" + i, { id: "t" + i, title: "Task " + i, due: "2026-09-25", status: "OPEN", type: "FOLLOW_UP" });
+    let r = await h.action({ action: "bulkTasks", op: "complete", ids: ["t1", "t2"] });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.count, 2);
+    assert.equal((await h.get("tasks", "t1")).status, "DONE");
+    assert.equal((await h.get("tasks", "t2")).status, "DONE");
+    assert.equal((await h.get("tasks", "t3")).status, "OPEN");
+    assert.ok((await h.get("tasks", "t1")).completedAt);
+    r = await h.action({ action: "bulkTasks", op: "reopen", ids: ["t1"] });
+    assert.equal((await h.get("tasks", "t1")).status, "OPEN");
+    assert.equal((await h.get("tasks", "t1")).completedAt, null);
+    assert.equal((await h.action({ action: "bulkTasks", op: "complete", ids: [] })).status, 400);
+    assert.equal((await h.action({ action: "bulkTasks", op: "delete", ids: ["t1"] })).status, 400);
+    const ev = (await h.db.prepare("SELECT data FROM objects WHERE kind='events'").all()).results
+      .map((x) => JSON.parse(x.data))
+      .filter((x) => String(x.message || "").includes("in one action"));
+    assert.ok(ev.length >= 2, "bulk task actions are logged like every other decision");
   } finally {
     await h.mf.dispose();
   }

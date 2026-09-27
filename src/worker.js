@@ -15,11 +15,35 @@ import {
   makeFollowup,
   makeInvoiceReminder,
   inPauseWindow,
+  urgentScore,
+  fitScore,
+  classifyReply,
+  phraseGaps,
+  URGENT_WORDS,
+  INTEREST_HINTS as INTEREST_HINTS_IMPORT,
+  emailStatus,
+  emailSyntaxOk,
+  emailTraits,
+  EMAIL_STATUS_LABEL,
+  bestEmail,
+  researchLine,
+  professionalOutreach,
+  cleanCompanyName,
+  isDirectoryName,
+  makeLocalizedDraft,
+  launchPlan,
+  goalPace,
+  healthCheck,
+  journey,
+  PLAYBOOK,
+  CONTENT_STARTERS,
   checkinPlan,
   marketingIdeas,
   businessMap,
 } from "./domain.js";
 import { xlsx, xlsxBook } from "./xlsx.js";
+import { overpassQuery, parseOverpass, pseSearchUrl, parsePSE, analyzeSite, nextOsmTarget } from "./sources.js";
+import { cityFor, citiesFor, marketCityCount, marketSummary } from "./markets.js";
 
 async function externalFetch(url, options = {}) {
   return fetch(url, { ...options, signal: AbortSignal.timeout(25000) });
@@ -375,6 +399,15 @@ function host(u) {
   const h = new URL(u).hostname.replace(/^www\./, "");
   return /\.(wordpress\.com|wixsite\.com)$/.test(h) ? h : Research.domain(u);
 }
+async function unsuppressLead(e, l) {
+  if (l.email)
+    await e.DB.prepare("DELETE FROM objects WHERE kind='suppression' AND id=?")
+      .bind(await hash(l.email.toLowerCase()))
+      .run();
+  l.suppressed = false;
+  l.consent = "NONE";
+  await put(e, "leads", l.id, l);
+}
 async function saveLead(e, l) {
   await e.DB.prepare(
     "INSERT INTO objects(kind,id,data) VALUES('leads',?,?) ON CONFLICT(kind,id) DO UPDATE SET data=CASE WHEN json_extract(objects.data,'$.suppressed')=1 THEN json_set(excluded.data,'$.suppressed',json('true'),'$.consent','NONE') ELSE excluded.data END,version=objects.version+1",
@@ -399,6 +432,9 @@ async function discover(e, manual = false) {
   if (leads.length >= 2500)
     throw Error("Pilot capacity: archive/export before more imports");
   const runtime = (await get(e, "runtime", "cursor")) || { cursor: 0 };
+  const beforeIds = new Set((await list(e, "leads")).map((l) => l.id));
+  const mode = (await get(e, "runtime", "discoveryMode")) || { mode: "TAVILY" };
+  let provider = mode.mode || "TAVILY";
   let pending = await list(e, "queue"),
     b = (await get(e, "budget", day())) || { search: 0, extract: 0 };
   const today = leads.filter(
@@ -436,19 +472,113 @@ async function discover(e, manual = false) {
       "online store",
     ];
     const sector = sectors[(runtime.cursor - 1) % sectors.length];
-    const query = `${t.type === "Agency partner" ? "digital agency" : t.type === "Freelancer partner" ? "independent freelance professional" : t.type === "New business" ? "new opening launch " + sector : t.type === "Public work request" ? "business seeking freelance website analytics developer" : sector} ${t.countryLabel} official website contact -site:trustpilot.com -site:facebook.com -site:linkedin.com -site:yelp.com -site:ensun.io -site:gov.uk -site:opencorporates.com -site:crunchbase.com`;
-    const results = await tavily(e, "search", {
-      query,
-      search_depth: "basic",
-      auto_parameters: false,
-      max_results: 10,
-      include_answer: false,
-      include_raw_content: false,
-    });
+    const city = cityFor(t.country, (runtime.cursor - 1) * 7 + (runtime.cursor % 3));
+    if (city) t.cityLabel = city;
+    const query = `${t.type === "Agency partner" ? "digital agency" : t.type === "Freelancer partner" ? "independent freelance professional" : t.type === "New business" ? "new opening launch " + sector : t.type === "Public work request" ? "business seeking freelance website analytics developer" : sector} ${t.cityLabel ? t.cityLabel + ", " : ""}${t.countryLabel} official website contact -site:trustpilot.com -site:facebook.com -site:linkedin.com -site:yelp.com -site:ensun.io -site:gov.uk -site:opencorporates.com -site:crunchbase.com`;
+    provider = await pickProvider(e, b);
+    let results = { results: [] };
+    if (provider === "TAVILY") {
+      try {
+        results = await tavily(e, "search", {
+          query,
+          search_depth: "basic",
+          auto_parameters: false,
+          max_results: 10,
+          include_answer: false,
+          include_raw_content: false,
+        });
+      } catch (err) {
+        await put(e, "runtime", "discoveryMode", {
+          mode: e.GOOGLE_PSE_KEY && e.GOOGLE_PSE_CX ? "PSE" : "OSM",
+          at: Date.now(),
+          reason: "Tavily search failed: " + safeError(err),
+        });
+        await telegram(e, "\u26A0\uFE0F Tavily search failed — switching discovery to the fallback source next run.").catch(() => {});
+        throw err;
+      }
+    } else if (provider === "PSE") {
+      const r = await externalFetch(
+        pseSearchUrl({ key: e.GOOGLE_PSE_KEY, cx: e.GOOGLE_PSE_CX, query, num: 10 }),
+      );
+      if (!r.ok) throw Error("PSE_HTTP_" + r.status);
+      results = { results: parsePSE(await r.json()) };
+      await log(e, "SEARCH", "Google Programmable Search (free 100/day fallback).");
+    } else {
+      const osm = nextOsmTarget(runtime.cursor);
+      const q = overpassQuery({ city: osm.city.city, category: osm.category, limit: 30 });
+      const r = await externalFetch("https://overpass-api.de/api/interpreter", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "data=" + encodeURIComponent(q),
+      });
+      if (!r.ok) throw Error("OSM_HTTP_" + r.status);
+      const found = parseOverpass(await r.json(), 30);
+      let made = 0;
+      for (const c of found) {
+        if (!primary(c.website)) continue;
+        const d = host(c.website), leadId = id();
+        const claim = await e.DB.prepare(
+          "INSERT OR IGNORE INTO dedup(domain,lead_id) VALUES(?,?) RETURNING domain",
+        ).bind(d, leadId).first();
+        if (!claim) continue;
+        const lead = {
+          id: leadId,
+          sourceKind: "DISCOVERY",
+          company: c.name,
+          website: c.website,
+          country: osm.city.country,
+          countryCode: osm.city.code,
+          type: "Established business",
+          niche: s.niche,
+          email: "",
+          phone: c.phone || "",
+          address: c.address || "",
+          person: "",
+          emailSource: "",
+          phoneSource: c.phone ? "OpenStreetMap listing" : "",
+          addressSource: c.address ? "OpenStreetMap listing" : "",
+          source: "OpenStreetMap",
+          evidence: "OpenStreetMap local business listing (© OpenStreetMap contributors, ODbL). Public details are not permission or intent. No site extraction yet.",
+          countryEvidence: osm.city.city + ", " + osm.city.country,
+          platform: "unknown",
+          analytics: null,
+          socials: {},
+          hiringSignal: false,
+          siteLanguage: "en",
+          status: "UNREVIEWED",
+          stage: "NEW",
+          consent: "NONE",
+          contactEvidence: "",
+          suppressed: false,
+          createdAt: now(),
+          notes: "Found by the OpenStreetMap fallback mode.",
+          nextActionAt: null,
+        };
+        const fit = fitScore(lead);
+        lead.fitScore = fit.score;
+        lead.fitReasons = fit.reasons;
+        await saveLead(e, lead);
+        made++;
+      }
+      await log(
+        e,
+        "SEARCH",
+        `OpenStreetMap fallback: ${made} local business(es) in ${osm.city.city} (${osm.category.value}).`,
+      );
+      if (made)
+        await telegram(e, `\u{1F5FA} Fallback added ${made} local prospect(s) near ${osm.city.city}.`).catch(() => {});
+      runtime.cursor++;
+      await put(e, "runtime", "cursor", runtime);
+      pending = (await list(e, "queue")).filter((x) => ["HOME", "CONTACT"].includes(x.phase) && primary(x.url));
+      return { counts: metrics(await list(e, "leads")) };
+    }
     if ((await settings(e)).paused)
       throw Error("Paused before committing discovery");
     for (const r of results.results || []) {
       if (!primary(r.url, r.title)) continue;
+      if (isDirectoryName(r.title, r.url)) continue;
+      const cleanName = cleanCompanyName(r.title, r.url);
+      if (!cleanName || cleanName.length < 3) continue;
       const d = host(r.url),
         leadId = id();
       const claim = await e.DB.prepare(
@@ -460,7 +590,7 @@ async function discover(e, manual = false) {
       await put(e, "queue", leadId, {
         id: leadId,
         url: r.url,
-        label: String(r.title).replace(/&amp;/g, "&").slice(0, 160),
+        label: cleanName,
         target: t,
         query,
         phase: "HOME",
@@ -470,7 +600,7 @@ async function discover(e, manual = false) {
     await log(
       e,
       "SEARCH",
-      `${t.countryLabel} · ${t.type} · ${t.niche}. Results are research candidates, not buyers.`,
+      `${t.cityLabel ? t.cityLabel + ", " : ""}${t.countryLabel} · ${t.type} · ${t.niche}. Results are research candidates, not buyers.`,
     );
   }
   pending = (await list(e, "queue"))
@@ -490,13 +620,39 @@ async function discover(e, manual = false) {
       ),
     );
   b = (await get(e, "budget", day())) || {};
-  if (pending.length && (b.extract || 0) < 20) {
-    const data = await tavily(e, "extract", {
-      urls: pending.map((x) => (x.phase === "CONTACT" ? x.contact : x.url)),
-      extract_depth: "basic",
-      format: "markdown",
-      timeout: 15,
-    });
+  if (pending.length && (provider === "TAVILY" ? (b.extract || 0) < 20 : true)) {
+    let data;
+    if (provider === "TAVILY") {
+      data = await tavily(e, "extract", {
+        urls: pending.map((x) => (x.phase === "CONTACT" ? x.contact : x.url)),
+        extract_depth: "basic",
+        format: "markdown",
+        timeout: 15,
+      });
+    } else {
+      /* Fallback mode: read the public page ourselves, no provider credits used. */
+      const results = [],
+        failed = [];
+      for (const job of pending.slice(0, 5)) {
+        const requested = job.phase === "CONTACT" ? job.contact : job.url;
+        try {
+          const r = await externalFetch(requested, {
+            headers: { "User-Agent": "ProspectStudioBot/0.6 (+research; contact owner)" },
+          });
+          const text = r.ok ? (await r.text()).slice(0, 40000) : "";
+          if (text && text.length > 200) results.push({ url: requested, raw_content: text });
+          else failed.push({ url: requested });
+        } catch {
+          failed.push({ url: requested });
+        }
+      }
+      data = { results, failed_results: failed };
+      await log(
+        e,
+        "EXTRACT",
+        `Fallback extraction read ${results.length} public page(s) directly (0 Tavily credits).`,
+      );
+    }
     if ((await settings(e)).paused)
       throw Error("Paused before committing enrichment");
     if (!Array.isArray(data.results) || !Array.isArray(data.failed_results))
@@ -514,12 +670,11 @@ async function discover(e, manual = false) {
           continue;
         }
       }
-      let parsed = page
-        ? Research.parsePage(
-            String(page.raw_content).slice(0, 40000),
-            page.url,
-            job.target.countryLabel,
-          )
+      const rawText = page ? String(page.raw_content).slice(0, 40000) : "";
+      const site = rawText ? analyzeSite(rawText) : null;
+      if (site) job.site = { ...(job.site || {}), ...site };
+      let parsed = rawText
+        ? Research.parsePage(rawText, page.url, job.target.countryLabel)
         : null;
       if (job.phase === "HOME" && parsed.contact && primary(parsed.contact)) {
         job.home = parsed;
@@ -550,6 +705,12 @@ async function discover(e, manual = false) {
         source: job.url,
         evidence: `Search hypothesis: ${job.query}. Public page extraction; intent and fit unverified.`,
         countryEvidence: p.geo,
+        cityLabel: job.target?.cityLabel || "",
+        platform: job.site?.platform || "unknown",
+        analytics: job.site?.analytics ?? null,
+        socials: job.site?.socials || {},
+        hiringSignal: !!job.site?.hiringSignal,
+        siteLanguage: job.site?.language || "en",
         status:
           p.flags.noOutsource || !p.flags.business ? "HOLD" : "UNREVIEWED",
         stage: "NEW",
@@ -560,17 +721,52 @@ async function discover(e, manual = false) {
         notes: "",
         nextActionAt: null,
       };
+      const fit = fitScore(lead);
+      lead.fitScore = fit.score;
+      lead.fitReasons = fit.reasons;
+      lead.company = cleanCompanyName(lead.company, lead.website) || lead.company;
+      lead.researchLine = researchLine(lead);
+      if (lead.email) {
+        try {
+          lead.emailStatus = await verifyLeadEmail(e, lead, true);
+        } catch {}
+      }
       await saveLead(e, lead);
       job.phase = "IMPORTED";
       delete job.home;
       await put(e, "queue", job.id, job);
     }
   }
-  return { counts: metrics(await list(e, "leads")) };
+  const after = await list(e, "leads");
+  const added = after.filter((l) => !beforeIds.has(l.id));
+  if (added.length) {
+    const conf = await settings(e);
+    await notify(
+      e,
+      "new",
+      `\u{1F50D} ${added.length} new prospect(s) researched\n${added
+        .slice(0, 5)
+        .map((l) => `• ${l.company} — ${l.cityLabel || l.country}${l.email ? " · " + (EMAIL_STATUS_LABEL[l.emailStatus] || "email found") : " · no email yet"}`)
+        .join("\n")}\n\nReview: ${e.APP_ORIGIN}/#prospects`,
+      conf,
+    );
+    if (conf.notifyEveryProspect) {
+      for (const l of added.slice(0, 5))
+        await notify(e, "new", `\u{1F195} ${l.company} · ${l.niche} · fit ${l.fitScore ?? "—"}/100`, conf);
+    }
+  }
+  return { counts: metrics(after), added: added.length };
 }
 async function sendOne(e) {
   const s = await settings(e);
   if (s.paused) return { status: "PAUSED", sent: 0 };
+  /* Delivery notices are read before anything new goes out, so a bounce is
+   * recorded against the lead before the next send — never on dashboard open. */
+  try {
+    await bounceSweep(e);
+  } catch (err) {
+    await log(e, "BOUNCE_ERROR", safeError(err));
+  }
   const win = inPauseWindow(s, day());
   if (win)
     return { status: "PAUSED_WINDOW", window: win, sent: 0 };
@@ -583,6 +779,44 @@ async function sendOne(e) {
     stale.status = "UNKNOWN";
     stale.failure = "Delivery uncertain: inspect Gmail Sent before any retry";
     await put(e, "drafts", stale.id, stale);
+  }
+  let autoApproved = 0;
+  if (s.autoApprove !== false) {
+    for (const draft of drafts.filter((x) => x.status === "DRAFT")) {
+      const lead = leads.find((l) => l.id === draft.leadId);
+      if (
+        !lead ||
+        lead.suppressed ||
+        lead.bounced ||
+        lead.status !== "APPROVED" ||
+        !lead.contactEvidence ||
+        !["OPT_IN", "BUSINESS_REVIEWED"].includes(lead.consent) ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lead.email || "") ||
+        ["NO_MAIL_SERVER", "INVALID_SYNTAX", "DISPOSABLE"].includes(lead.emailStatus) ||
+        ["WON", "LOST"].includes(lead.stage) ||
+        lead.replyAt
+      )
+        continue;
+      draft.status = "APPROVED";
+      draft.approvedAt = now();
+      draft.approvedEmail = lead.email;
+      draft.approvedBy = "autopilot";
+      await put(e, "drafts", draft.id, draft);
+      autoApproved++;
+    }
+    if (autoApproved) {
+      await log(
+        e,
+        "AUTO_APPROVE",
+        `${autoApproved} draft(s) approved by the autopilot: every safety check already passed (approved source, recorded basis, valid address, no hold or suppression, inside the daily cap). Counted in Activity.`,
+      );
+      await notify(
+        e,
+        "sends",
+        `\u2705 ${autoApproved} draft(s) auto-approved — they were already safe to send. Turn this off any time in Automation.`,
+        s,
+      );
+    }
   }
   const d = drafts.find(
     (x) =>
@@ -671,20 +905,32 @@ async function sendOne(e) {
         await put(e, "invoices", inv.id, inv);
       }
     }
+    /* The follow-up is created at the moment of the send, never from memory, and
+     * the thread gets a revisit date so nothing is silently forgotten. */
+    const revisit = new Date(Date.now() + (s.followUpDays || 4) * 86400000)
+      .toLocaleDateString("en-CA", { timeZone: "Asia/Dhaka" });
+    l.parkedAt = d.sentAt;
+    l.revisitAt = revisit;
+    await saveLead(e, l);
     await put(e, "tasks", "followup-" + d.id, {
       id: "followup-" + d.id,
       title: "Review reply / next step — " + l.company,
       leadId: l.id,
       type: "FOLLOW_UP",
-      due: new Date(Date.now() + 4 * 86400000).toLocaleDateString("en-CA", {
-        timeZone: "Asia/Dhaka",
-      }),
+      due: revisit,
       status: "OPEN",
+      createdAt: now(),
     });
     await log(
       e,
       "SENT",
       "Approved/opted-in message accepted by Gmail. Inbox delivery is not guaranteed.",
+    );
+    await notify(
+      e,
+      "sends",
+      `\u{1F4E4} Sent to ${l.company}${d.approvedBy === "autopilot" ? " (auto-approved)" : ""}\nSubject: ${d.subject}\nFollow-up parked for ${revisit}\n\n${e.APP_ORIGIN}/#mail`,
+      s,
     );
     return { sent: 1 };
   } catch (err) {
@@ -851,6 +1097,465 @@ async function mailOwner(e, subject, text) {
   if (!r.ok) throw Error("OWNER_MAIL_HTTP_" + r.status);
   return { id: (await r.json()).id };
 }
+
+
+/* ------------------------------------------------------- notification centre -- *
+ * Every meaningful event can reach Telegram. The owner controls each type, and
+ * "notifyAll" is the master switch. Nothing here blocks the work it reports.
+ */
+const APP_VERSION = "0.8.0";
+const NOTIFY_KEYS = {
+  new: "notifyNew",
+  sends: "notifySends",
+  replies: "notifyReplies",
+  urgent: "notifyUrgent",
+  content: "notifyContent",
+  bounces: "notifyBounces",
+  money: "notifyMoney",
+  tasks: "notifyTasks",
+  digest: "notifyDigest",
+  errors: "notifyErrors",
+};
+const NOTIFY_KEY_META = [
+  { key: "notifyNew", label: "New prospect found", why: "Fires per discovery batch so you can watch the funnel fill." },
+  { key: "notifySends", label: "Every message sent", why: "Fires per send, with the recipient, the basis and the follow-up date." },
+  { key: "notifyReplies", label: "Any reply", why: "Fires per reply with the class it was put in and why." },
+  { key: "notifyUrgent", label: "Urgent / act-now replies", why: "Fires the moment a message asks for immediate contact, with the matched words." },
+  { key: "notifyBounces", label: "Bounces", why: "Fires per bounced address and suppresses it before the next send." },
+  { key: "notifyMoney", label: "Money: invoices, reminders, payments, goals", why: "Fires per overdue invoice, each reminder draft, each payment and each goal step." },
+  { key: "notifyTasks", label: "Work board tasks", why: "Fires per new task, including the revisit date set at send time." },
+  { key: "notifyContent", label: "Content drafts", why: "Fires once a day when the draft is ready." },
+  { key: "notifyDigest", label: "Weekly digest", why: "Fires on Sunday with the numbers." },
+  { key: "notifyErrors", label: "Errors / things needing you", why: "Fires when something needs a human decision." },
+];
+function knownUrgentWords(conf = {}) {
+  return [
+    ...URGENT_WORDS,
+    ...(INTEREST_HINTS_IMPORT || []),
+    ...String(conf.urgentWords || "").split(","),
+    ...String(conf.urgentKeywords || "").split(","),
+  ]
+    .map((w) => String(w).trim().toLowerCase())
+    .filter(Boolean);
+}
+async function notify(e, key, text, s = null) {
+  const conf = s || (await settings(e));
+  if (conf.notifyAll === false) return { skipped: "NOTIFY_MASTER_OFF" };
+  const field = NOTIFY_KEYS[key];
+  if (field && conf[field] === false) return { skipped: "NOTIFY_OFF_" + key };
+  const r = await telegram(e, text);
+  await log(
+    e,
+    r.ok ? "NOTIFIED" : r.skipped ? "NOTIFY_SKIPPED" : "NOTIFICATION_FAILED",
+    `${key}: ${String(text).split("\n").slice(0, 2).join(" — ")}`,
+  );
+  return r;
+}
+
+/* ------------------------------------------------------------ email checking -- *
+ * Free DNS-over-HTTPS MX lookup. "MX found" means the domain accepts mail; it is
+ * never presented as proof that a human reads that mailbox.
+ */
+async function mxLookup(domain) {
+  const r = await externalFetch(
+    "https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(domain) + "&type=MX",
+    { headers: { Accept: "application/dns-json" } },
+  );
+  if (!r.ok) return null;
+  const b = await r.json();
+  if (!Array.isArray(b.Answer)) return false;
+  return b.Answer.some((a) => a.type === 15 && String(a.data || "").length > 4);
+}
+async function verifyLeadEmail(e, lead, force = false) {
+  /* The verdict is tied to the exact address: change the address and it is checked again. */
+  if (!lead?.email || !emailSyntaxOk(lead.email)) {
+    if (lead) {
+      lead.emailStatus = lead?.email ? "INVALID_SYNTAX" : "NO_EMAIL";
+      lead.emailCheckedAt = now();
+      lead.emailCheckedFor = lead.email || "";
+    }
+    return lead?.emailStatus;
+  }
+  if (lead.emailStatus && !force && lead.emailCheckedFor === lead.email) return lead.emailStatus;
+  const domain = String(lead.email).split("@")[1] || "";
+  let mx = null;
+  try {
+    mx = await mxLookup(domain);
+  } catch {
+    mx = null;
+  }
+  lead.emailStatus = emailStatus(lead.email, mx);
+  lead.emailCheckedAt = now();
+  lead.emailCheckedFor = lead.email;
+  return lead.emailStatus;
+}
+async function verifyEmails(e, { limit = 40, force = false } = {}) {
+  const leads = await list(e, "leads");
+  const stale = (l) => force || !l.emailCheckedAt || l.emailCheckedFor !== l.email;
+  const todo = leads.filter((l) => l.email && stale(l)).slice(0, limit);
+  const counts = {};
+  for (const l of todo) {
+    const st = await verifyLeadEmail(e, l, force);
+    counts[st] = (counts[st] || 0) + 1;
+    await saveLead(e, l);
+  }
+  if (todo.length)
+    await log(
+      e,
+      "EMAIL_CHECK",
+      `${todo.length} address(es) checked: ${Object.entries(counts).map(([k, v]) => k + " " + v).join(", ")}. "MX found means the domain accepts mail, not that a person reads it.`,
+    );
+  return {
+    checked: todo.length,
+    counts,
+    usable: counts.MX_OK || 0,
+    roleOnly: counts.MX_OK_ROLE || 0,
+    unusable: (counts.INVALID_SYNTAX || 0) + (counts.NO_MAIL_SERVER || 0) + (counts.DISPOSABLE || 0),
+    remaining: Math.max(0, leads.filter((l) => l.email && stale(l)).length - todo.length),
+  };
+}
+/* Find the contact detail the first pass missed: read the public site and its
+ * contact page directly (no provider credits) and keep only real addresses. */
+async function findMissingEmails(e, { limit = 8 } = {}) {
+  const leads = await list(e, "leads");
+  const todo = leads
+    .filter((l) => !l.email && l.website && l.status !== "HOLD")
+    .slice(0, limit);
+  let found = 0;
+  for (const l of todo) {
+    const urls = [l.website];
+    try {
+      const u = new URL(l.website);
+      urls.push(u.origin + "/contact", u.origin + "/contact-us", u.origin + "/about");
+    } catch {}
+    const candidates = [];
+    for (const url of urls) {
+      try {
+        const r = await externalFetch(url, {
+          headers: { "User-Agent": "ProspectStudioBot/0.8 (+research; owner contact in file)" },
+        });
+        if (!r.ok) continue;
+        const html = (await r.text()).slice(0, 120000);
+        for (const m of html.matchAll(/mailto:([^"'?\s>]+)/gi)) candidates.push(m[1].toLowerCase());
+        for (const m of html.matchAll(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g))
+          candidates.push(m[0].toLowerCase());
+        if (candidates.length >= 6) break;
+      } catch {}
+    }
+    const usable = candidates.filter(
+      (x) =>
+        emailSyntaxOk(x) &&
+        !/@(example|domain|email|yourdomain|sentry|wixpress|shopify|\.png|\.jpg|\.webp|godaddy|cloudflare)/i.test(x) &&
+        !/^(no-?reply|donotreply|postmaster)@/i.test(x),
+    );
+    if (!usable.length) {
+      l.emailSearchAt = now();
+      l.emailSource = "Checked the public pages — no address published";
+      await saveLead(e, l);
+      continue;
+    }
+    const ranked = usable
+      .map((email) => ({ email, status: emailStatus(email, null), traits: emailTraits(email) }))
+      .sort((a, b) => (a.traits.role === b.traits.role ? 0 : a.traits.role ? 1 : -1));
+    const pick = bestEmail(ranked) || ranked[0];
+    l.email = pick.email;
+    l.emailSource = "Public page extraction (contact pages read directly)";
+    l.emailStatus = pick.status;
+    l.emailCheckedAt = now();
+    l.consent = "NONE";
+    l.contactEvidence = "";
+    l.status = l.status === "HOLD" ? "HOLD" : "UNREVIEWED";
+    await saveLead(e, l);
+    found++;
+  }
+  if (found) {
+    const st = await settings(e);
+    await notify(e, "new", `\u{1F50E} ${found} new contact address(es) found by reading public pages. Nothing was sent — review them in Prospects.`, st);
+  }
+  await log(
+    e,
+    "EMAIL_FIND",
+    `${found} address(es) found on public pages; ${todo.length - found} site(s) publish no address.`,
+  );
+  return { checked: todo.length, found, misses: todo.length - found };
+}
+/* Bounce handling: read the mailbox's delivery notices BEFORE sending anything new. */
+async function bounceSweep(e) {
+  if (!(await get(e, "credentials", "gmail"))) return { skipped: "GMAIL_NOT_CONNECTED" };
+  const stamp = await get(e, "runtime", "bounceSweep");
+  if (stamp && Date.now() - stamp.at < 1800000) return { skipped: "RECENT", handled: 0 };
+  await put(e, "runtime", "bounceSweep", { at: Date.now() });
+  const q =
+    'in:anywhere newer_than:14d (from:mailer-daemon OR from:postmaster OR subject:"Delivery Status Notification" OR subject:"Undelivered Mail Returned to Sender" OR subject:"failure notice")';
+  const res = await gmail(e, "messages?maxResults=10&q=" + encodeURIComponent(q));
+  const handled = [];
+  const leads = await list(e, "leads");
+  for (const m of res.messages || []) {
+    if (await get(e, "bounces", m.id)) continue;
+    const msg = await gmail(e, `messages/${m.id}?format=full`);
+    const headers = msg.payload?.headers || [];
+    const subject = headers.find((x) => x.name.toLowerCase() === "subject")?.value || "";
+    const text = `${String(msg.snippet || "")} ${await gmailTextOf(msg)}`;
+    const addresses = [...text.matchAll(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g)]
+      .map((x) => x[0].toLowerCase())
+      .filter((x) => !/mailer-daemon|postmaster|googlemail|google\.com|noreply/i.test(x));
+    const lead = leads.find((l) => addresses.includes(String(l.email || "").toLowerCase()));
+    await put(e, "bounces", m.id, {
+      id: m.id,
+      at: now(),
+      subject: String(subject).slice(0, 160),
+      addresses: addresses.slice(0, 5),
+      leadId: lead?.id || null,
+      snippet: String(msg.snippet || "").slice(0, 300),
+    });
+    if (lead) {
+      lead.bounced = true;
+      lead.bouncedAt = now();
+      lead.emailStatus = "NO_MAIL_SERVER";
+      lead.suppressed = true;
+      await saveLead(e, lead);
+      await put(e, "suppression", await hash(String(lead.email).toLowerCase()), {
+        email: String(lead.email).toLowerCase(),
+        reason: "Hard bounce reported by the mail provider",
+        at: now(),
+      });
+    }
+    handled.push({ id: m.id, leadId: lead?.id || null, email: addresses[0] || "" });
+  }
+  if (handled.length) {
+    const st = await settings(e);
+    await log(e, "BOUNCE", `${handled.length} delivery failure(s) recorded; those addresses now block every future send.`);
+    await notify(
+      e,
+      "bounces",
+      `\u26A0\uFE0F ${handled.length} delivery failure(s) recorded\n${handled
+        .map((x) => "• " + (x.email || "unknown") + (x.leadId ? " — lead marked bounced and suppressed" : " — no matching lead"))
+        .join("\n")}`,
+      st,
+    );
+  } else {
+    await log(e, "BOUNCE", "Delivery notices checked before sending: nothing new.");
+  }
+  return { handled: handled.length, results: handled };
+}
+async function gmailTextOf(msg) {
+  const dec = (d) => {
+    try {
+      return decodeURIComponent(escape(atob(String(d).replace(/-/g, "+").replace(/_/g, "/"))));
+    } catch {
+      return "";
+    }
+  };
+  const walk = (p) =>
+    !p ? [] : [p.body?.data ? dec(p.body.data) : "", ...(p.parts || []).flatMap(walk)];
+  return walk(msg.payload).join(" ").slice(0, 4000);
+}
+
+async function telegram(e, text) {
+  if (demo(e) || !e.TELEGRAM_BOT_TOKEN || !e.TELEGRAM_CHAT_ID)
+    return { skipped: true };
+  const r = await externalFetch(
+    `https://api.telegram.org/bot${e.TELEGRAM_BOT_TOKEN}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: e.TELEGRAM_CHAT_ID, text: String(text).slice(0, 4000) }),
+    },
+  );
+  return { ok: r.ok };
+}
+async function aiUrgent(e, text) {
+  if (!e.GEMINI_API_KEY || !e.GEMINI_MODEL || e.AI_FREE_CONFIRMED !== "true")
+    throw Error("AI_NOT_CONNECTED");
+  const r = await externalFetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(e.GEMINI_MODEL)}:generateContent`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": e.GEMINI_API_KEY },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text:
+                  "Classify this single business email reply. Answer with exactly one word on the first line: URGENT (they want a call, an immediate reply, or time-pressured action), HIGH (clear interest or a meeting request), or NORMAL. Then one short line of why. Reply text: " +
+                  String(text).slice(0, 1500),
+              },
+            ],
+          },
+        ],
+        generationConfig: { maxOutputTokens: 120 },
+      }),
+    },
+  );
+  if (!r.ok) throw Error("AI_HTTP_" + r.status);
+  const b = await r.json();
+  const out = b.candidates?.[0]?.content?.parts?.map((x) => x.text).join("") || "";
+  const tier = /^\s*URGENT/i.test(out) ? "URGENT" : /^\s*HIGH/i.test(out) ? "HIGH" : null;
+  return { tier, why: out.slice(0, 300) };
+}
+
+async function pickProvider(e, b) {
+  const key = day().slice(0, 7);
+  const month = (await get(e, "month", key)) || { credits: 0 };
+  const prev = await get(e, "runtime", "discoveryMode");
+  let mode = "TAVILY";
+  if (!e.TAVILY_API_KEY || Number(month.credits || 0) >= 900)
+    mode = e.GOOGLE_PSE_KEY && e.GOOGLE_PSE_CX ? "PSE" : "OSM";
+  if (prev?.mode !== mode) {
+    const reason =
+      mode === "TAVILY"
+        ? "Primary search restored."
+        : !e.TAVILY_API_KEY
+          ? "Tavily key missing."
+          : "Monthly Tavily budget spent (900 credits reserved).";
+    await put(e, "runtime", "discoveryMode", { mode, at: Date.now(), reason });
+    await log(
+      e,
+      "DISCOVERY_MODE",
+      `Discovery fallback switched to ${mode}. ${reason}`,
+    );
+    await telegram(
+      e,
+      `\u{1F504} Discovery switched to ${mode}\n${reason}\nResearch continues automatically.`,
+    ).catch(() => {});
+  }
+  return mode;
+}
+
+async function urgentWatch(e) {
+  const s = await settings(e);
+  if (s.urgentWatch === false) return { skipped: "URGENT_WATCH_OFF" };
+  if (!(await get(e, "credentials", "gmail"))) return { skipped: "GMAIL_NOT_CONNECTED" };
+  const sentDrafts = (await list(e, "drafts")).filter((x) => x.threadId);
+  const sentMail = (await list(e, "mail")).filter(
+    (x) => x.direction === "OUT" && x.threadId,
+  );
+  const ours = [...sentDrafts, ...sentMail];
+  const mine = new Set(ours.map((x) => x.threadId));
+  const leads = await list(e, "leads");
+  const seenLog = new Set((await list(e, "inboxlog")).map((x) => x.id));
+  const seenUrgent = new Set((await list(e, "urgent")).map((x) => x.gmailId));
+  const res = await gmail(
+    e,
+    "messages?maxResults=10&q=" + encodeURIComponent("in:inbox newer_than:2d"),
+  );
+  const summary = { checked: 0, stored: 0, flagged: 0, classes: {} };
+  for (const m of res.messages || []) {
+    if (seenLog.has(m.id) && seenUrgent.has(m.id)) continue;
+    const mineThread = mine.has(m.threadId);
+    if (!mineThread && s.watchAllInbox !== true) continue;
+    summary.checked++;
+    const msg = await gmail(
+      e,
+      `messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Auto-Submitted&metadataHeaders=List-Id`,
+    );
+    const headers = msg.payload?.headers || [];
+    const h = (n) => headers.find((x) => x.name.toLowerCase() === n)?.value || "";
+    const autoSubmitted = h("auto-submitted");
+    if (autoSubmitted && autoSubmitted.toLowerCase() !== "no") {
+      /* RFC 3834: header beats keywords — an out-of-office is not a lead. */
+    }
+    const from = h("from");
+    const email =
+      from.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/)?.[0]?.toLowerCase() || "";
+    if (email === String(e.OWNER_EMAIL || "").toLowerCase()) continue;
+    const snippet = String(msg.snippet || "");
+    const viaThread = ours.find((d) => d.threadId === m.threadId)?.leadId;
+    const lead =
+      leads.find((x) => x.email?.toLowerCase() === email) ||
+      leads.find((x) => x.id === viaThread) ||
+      null;
+    const knownSender = !!leads.find((x) => x.email?.toLowerCase() === email);
+    const verdict = classifyReply(snippet, {
+      subject: h("subject"),
+      autoSubmitted,
+      senderIsNew: mineThread && !knownSender,
+      threadKnown: mineThread,
+      extraWords: s.urgentWords,
+    });
+    const aiUsed = s.urgentAi && e.GEMINI_API_KEY && e.AI_FREE_CONFIRMED === "true";
+    let hits = verdict.hits;
+    if (aiUsed && verdict.class !== "OFFICE" && verdict.class !== "NEGATIVE") {
+      try {
+        const ai = await aiUrgent(e, snippet);
+        if (ai.tier && !hits.length) hits = ["AI: " + (ai.why || "flagged")];
+      } catch {}
+    }
+    const record = {
+      id: m.id,
+      gmailId: m.id,
+      threadId: msg.threadId,
+      leadId: lead?.id || null,
+      email,
+      from: String(from).slice(0, 200),
+      subject: h("subject").slice(0, 200),
+      snippet: snippet.slice(0, 400),
+      class: verdict.class,
+      tier: verdict.tier || "NORMAL",
+      hits: hits.slice(0, 6),
+      why: verdict.why,
+      autoSubmitted: !!autoSubmitted,
+      aiUsed,
+      at: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : now(),
+      day: day(),
+      handled: false,
+    };
+    /* Everything that passes through is stored, hits or not, so the owner can
+     * skim the week and see which phrases the keyword list is missing. */
+    await put(e, "inboxlog", m.id, record);
+    summary.stored++;
+    summary.classes[verdict.class] = (summary.classes[verdict.class] || 0) + 1;
+    if (!["INTERESTED", "NEGATIVE", "FORWARD"].includes(verdict.class)) continue;
+    summary.flagged++;
+    await put(e, "urgent", m.id, record);
+    if (lead && verdict.class === "INTERESTED") {
+      lead.urgentAt = record.at;
+      lead.urgentTier = record.tier;
+      await saveLead(e, lead);
+    }
+    const who = lead?.company || from || email || "someone";
+    const flag =
+      verdict.class === "INTERESTED"
+        ? record.tier === "URGENT"
+          ? "\u{1F534} URGENT reply"
+          : "\u{1F7E0} INTERESTED reply"
+        : verdict.class === "NEGATIVE"
+          ? "\u26D4 NEGATIVE reply — nothing was done automatically"
+          : "\u27A1\uFE0F Forwarded / new sender on a thread";
+    await notify(
+      e,
+      verdict.class === "INTERESTED" ? "urgent" : "replies",
+      `${flag}\n${who} — "${snippet.slice(0, 140)}"\nMatched: ${(hits.length ? hits : [verdict.why]).join(" · ")}\n\nOpen Email activity: ${e.APP_ORIGIN}/#mail`,
+      s,
+    );
+    await mailOwner(
+      e,
+      `${record.tier === "URGENT" ? "URGENT" : verdict.class} reply — ${who}`,
+      `Classified as ${verdict.class} (${verdict.tier || "no urgency"}).\n\nFrom: ${from}\nSubject: ${record.subject}\nMatched: ${(hits.length ? hits : [verdict.why]).join(" · ")}\n\n${snippet}\n\n${e.APP_ORIGIN}/#mail`,
+    ).catch(() => {});
+    if (verdict.class === "INTERESTED") {
+      await put(e, "tasks", "urgent-" + m.id, {
+        id: "urgent-" + m.id,
+        title: (record.tier === "URGENT" ? "Call back — " : "Answer — ") + who,
+        leadId: lead?.id || null,
+        type: "FOLLOW_UP",
+        due: day(),
+        status: "OPEN",
+        createdAt: now(),
+      });
+    }
+  }
+  if (summary.stored)
+    await log(
+      e,
+      "REPLY_CLASS",
+      `${summary.stored} new message(s) classified: ${Object.entries(summary.classes)
+        .map(([k, v]) => k + " " + v)
+        .join(", ")}. Alerts only — nothing was suppressed or answered automatically.`,
+    );
+  return summary;
+}
 async function followupDrafts(e) {
   const s = await settings(e);
   if (s.followUpOn === false) return { skipped: "FOLLOW_UP_OFF", created: 0 };
@@ -895,6 +1600,16 @@ async function followupDrafts(e) {
     });
     created.push(f.id);
   }
+  if (created.length)
+    await notify(
+      e,
+      "replies",
+      `\u{1F501} ${created.length} follow-up draft(s) ready for review: ${created
+        .slice(0, 3)
+        .map((x) => x.company)
+        .join(", ")}`,
+      s,
+    ).catch(() => {});
   if (created.length)
     await log(
       e,
@@ -951,6 +1666,13 @@ async function invoiceReminders(e, onlyId = null) {
     created.push(d.id);
   }
   if (created.length)
+    await notify(
+      e,
+      "money",
+      `\u{1F4B0} ${created.length} invoice reminder draft(s) ready — overdue money, polite wording, your approval first.`,
+      s,
+    ).catch(() => {});
+  if (created.length)
     await log(
       e,
       "INVOICE_REMINDER",
@@ -959,6 +1681,9 @@ async function invoiceReminders(e, onlyId = null) {
   return { created: created.length, ids: created };
 }
 const RESTORE_KINDS = [
+  "health",
+  "urgent",
+  "plans",
   "settings",
   "leads",
   "drafts",
@@ -1049,6 +1774,39 @@ async function restoreBackup(e, backup, mode, dryRun) {
     );
   return { dryRun, mode, total, written: dryRun ? 0 : writes.length, summary };
 }
+
+async function dailySummary(e, d) {
+  const s = await settings(e);
+  const leads = await list(e, "leads");
+  const drafts = await list(e, "drafts");
+  const mail = await list(e, "mail");
+  const urgent = (await list(e, "urgent")).filter((x) => !x.handled && x.tier !== "NORMAL");
+  const content = await list(e, "content");
+  const tasks = await list(e, "tasks");
+  const invoices = await list(e, "invoices");
+  const today = (t) => String(t || "").slice(0, 10) === d;
+  const newLeads = leads.filter((l) => today(l.createdAt)).length;
+  const sentToday = mail.filter((m) => m.direction === "OUT" && today(m.at)).length;
+  const repliesToday = mail.filter((m) => m.direction === "IN" && today(m.at)).length;
+  const dueTasks = tasks.filter((t) => t.status === "OPEN" && t.due && t.due <= d).length;
+  const overdue = invoices.filter((i) => i.status !== "PAID" && i.dueAt && i.dueAt < d);
+  const pending = drafts.filter((x) => x.status === "UNREVIEWED").length;
+  const line = (label, v, flag) => (flag ? "\u26A0\uFE0F" : "\u2022") + " " + label + ": " + v;
+  return [
+    "Prospect Studio — " + d + " summary",
+    line("New prospects", newLeads, false),
+    line("Emails sent (approved)", sentToday, false),
+    line("Replies received", repliesToday, false),
+    line("Urgent replies waiting on you", urgent.length, urgent.length > 0),
+    line("Drafts awaiting review", pending, pending > 25),
+    line("Tasks due/overdue", dueTasks, dueTasks > 3),
+    line("Overdue invoices", overdue.length + (overdue.length ? " (" + overdue.map((i) => i.id).slice(0, 3).join(", ") + ")" : ""), overdue.length > 0),
+    line("Content drafts today", content.filter((c) => today(c.date)).length, false),
+    "",
+    "Open: " + e.APP_ORIGIN + "/#overview",
+  ].join("\n");
+}
+
 async function report(e, previous = false) {
   const d = previous
     ? new Date(Date.now() - 86400000).toLocaleDateString("en-CA", {
@@ -1071,23 +1829,42 @@ async function report(e, previous = false) {
     target: s.dailyTarget,
     rows,
   });
+  const body =
+    `Daily research ${d}: ${rows.length} new rows; ${rows.filter((x) => x.status === "HOLD").length} held. Target ${s.dailyTarget}; no buyer guarantees.\n\n` +
+    (await dailySummary(e, d));
   if (!demo(e) && e.TELEGRAM_BOT_TOKEN && e.TELEGRAM_CHAT_ID) {
-    const r = await externalFetch(
-      `https://api.telegram.org/bot${e.TELEGRAM_BOT_TOKEN}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: e.TELEGRAM_CHAT_ID,
-          text: `Daily research ${d}: ${rows.length} new rows; ${rows.filter((x) => x.status === "HOLD").length} held. Target ${s.dailyTarget}; no buyer guarantees. Private report: ${e.APP_ORIGIN}/#reports`,
-        }),
-      },
-    );
+    const r = await telegram(e, body);
     await log(
       e,
       r.ok ? "NOTIFIED" : "NOTIFICATION_FAILED",
-      "Daily report stored. Telegram delivery attempt recorded; no blind retry.",
+      "Daily all-in-one summary pushed to Telegram; owner email skipped because Telegram is connected.",
     );
+  } else if (!demo(e)) {
+    try {
+      await mailOwner(e, "Prospect Studio daily summary — " + d, body);
+      await log(e, "NOTIFIED", "Telegram not connected; daily summary emailed to the owner instead.");
+    } catch (err) {
+      await log(e, "NOTIFICATION_FAILED", "Daily summary could not be delivered: " + safeError(err));
+    }
+  }
+  const dhakaDow = Number(
+    new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Dhaka", weekday: "short" }).format(new Date()),
+  );
+  if (dhakaDow === 0) {
+    try {
+      const health = healthCheck({
+        leads: await list(e, "leads"),
+        invoices: await list(e, "invoices"),
+        tasks: await list(e, "tasks"),
+        content: await list(e, "content"),
+        day: d,
+      });
+      await put(e, "health", d, { id: d, at: now(), items: health });
+      await telegram(e, "\u{1FA7A} Weekly business health check\n" + health.map((x) => "\u2022 " + x.text).join("\n")).catch(() => {});
+      await log(e, "HEALTH", "Weekly health check stored with " + health.length + " item(s).");
+    } catch (err) {
+      await log(e, "HEALTH_ERROR", safeError(err));
+    }
   }
 }
 async function aiWrite(e, s, instruction, channel, topic) {
@@ -1211,6 +1988,10 @@ async function suggestions(e) {
 async function seed(e) {
   if (!demo(e) || (await get(e, "settings", "main"))) return;
   await put(e, "settings", "main", { ...defaults, paused: false });
+  const demoFit = {
+    "demo-1": { platform: "wix", analytics: false, hiringSignal: true, socials: {} },
+    "demo-2": { platform: "wordpress", analytics: true, hiringSignal: false, socials: { linkedin: "https://linkedin.com/company/example" } },
+  };
   for (const [i, name, niche, type, country] of [
     [
       1,
@@ -1271,6 +2052,9 @@ async function seed(e) {
           }
         : {}),
     };
+    const demoFitScore = fitScore(l);
+    l.fitScore = demoFitScore.score;
+    l.fitReasons = demoFitScore.reasons;
     await saveLead(e, l);
   }
   await put(e, "campaigns", "demo-campaign", {
@@ -1327,6 +2111,29 @@ async function seed(e) {
     status: "OVERDUE",
     note: "Fictional demo invoice (overdue)",
     createdAt: now(),
+  });
+  await put(e, "urgent", "demo-urgent-1", {
+    id: "demo-urgent-1",
+    gmailId: "demo-urgent-1",
+    threadId: "demo-thread-2",
+    leadId: "demo-2",
+    email: "hello@orbitworks.example",
+    from: "Priya Raman <hello@orbitworks.example>",
+    subject: "Re: tracking and reports",
+    snippet:
+      "We are ready to sign — can you call now? Best number is the one on our site, we need it before Friday.",
+    tier: "URGENT",
+    hits: ["call now", "phone number in message", "ready to pay"],
+    at: now(),
+    handled: false,
+  });
+  await put(e, "health", day(), {
+    id: day(),
+    at: now(),
+    items: [
+      { level: "high", text: "1 urgent reply is waiting for your call (fictional demo)." },
+      { level: "medium", text: "One demo invoice is overdue — a reminder draft is ready in Finance." },
+    ],
   });
   for (const c of checkinPlan)
     await put(e, "tasks", "checkin-demo-3-" + c.offset, {
@@ -1410,7 +2217,39 @@ async function state(e) {
     runtime: {
       replySync: (await get(e, "runtime", "replySync")) || null,
       ai: (await get(e, "runtime", "ai")) || null,
+      discoveryMode: (await get(e, "runtime", "discoveryMode")) || null,
     },
+    urgent: (await list(e, "urgent"))
+      .sort((a, b) => (b.at > a.at ? 1 : -1))
+      .slice(0, 25),
+    playbook: PLAYBOOK,
+    contentStarters: CONTENT_STARTERS,
+    plans: (await list(e, "plans")).sort((a, b) => (b.id > a.id ? 1 : -1)).slice(0, 5),
+    health: (await list(e, "health")).sort((a, b) => (b.id > a.id ? 1 : -1))[0] || null,
+    journey: journey(leads, await list(e, "invoices")),
+    inbox: (await list(e, "inboxlog")).sort((a, b) => (b.at > a.at ? 1 : -1)).slice(0, 60),
+    inboxGaps: phraseGaps(
+      await list(e, "inboxlog"),
+      knownUrgentWords(await settings(e)),
+    ),
+    bounces: (await list(e, "bounces")).slice(0, 25),
+    emailCounts: leads.reduce((acc, l) => {
+      const k = l.email ? l.emailStatus || "SYNTAX_OK" : "NO_EMAIL";
+      acc[k] = (acc[k] || 0) + 1;
+      return acc;
+    }, {}),
+    emailLabels: EMAIL_STATUS_LABEL,
+    marketCities: marketSummary,
+    marketCityCount,
+    cityCount: citiesFor((await settings(e)).focusCountries?.[0] || "GB")?.length || 0,
+    version: APP_VERSION,
+    notifyKeys: NOTIFY_KEY_META,
+    goals: await goalPace({
+      settings: await settings(e),
+      leads,
+      invoices: await list(e, "invoices"),
+      dayISO: day(),
+    }),
     campaigns: await list(e, "campaigns"),
     invoices: await list(e, "invoices"),
     digest: (await list(e, "digests"))[0] || null,
@@ -1523,6 +2362,10 @@ async function action(e, body) {
       }
       for (const k of ["notes", "contactEvidence", "nextActionAt"])
         if (k in v) l[k] = String(v[k]).slice(0, 2000);
+      if ("language" in v) {
+        if (!["", "en", "bn"].includes(v.language)) throw Error("Invalid language");
+        l.language = v.language;
+      }
       if (v.status) {
         if (!["UNREVIEWED", "APPROVED", "HOLD"].includes(v.status))
           throw Error("Invalid review status");
@@ -1591,8 +2434,9 @@ async function action(e, body) {
           if (!welcomeExists) {
             const wd = {
               id: id(),
-              ...makeDraft(l, s, "welcome"),
+              ...makeLocalizedDraft(l, s, "welcome", l.language || s.language),
               kind: "welcome",
+              language: l.language || s.language,
             };
             await put(e, "drafts", wd.id, wd);
           }
@@ -1648,14 +2492,8 @@ async function action(e, body) {
       if (v.suppressed === false) {
         if (!l.suppressed && !(await get(e, "suppression", l.email ? await hash(l.email.toLowerCase()) : "")))
           throw Error("Contact is not currently suppressed");
-        if (l.email)
-          await e.DB.prepare(
-            "DELETE FROM objects WHERE kind='suppression' AND id=?",
-          )
-            .bind(await hash(l.email.toLowerCase()))
-            .run();
-        l.suppressed = false;
-        await put(e, "leads", l.id, l);
+        await unsuppressLead(e, l);
+        await log(e, "RESTORE", `${l.company} can be contacted again — the permitted basis must be recorded fresh.`);
       }
       if (v.recordContact === true) {
         if (!l.notes || l.notes.length < 10)
@@ -1695,7 +2533,8 @@ async function action(e, body) {
         throw Error(
           "An active draft of this type already exists for this contact",
         );
-      const d = { id: id(), ...makeDraft(l, s, kind), kind };
+      const lang = ["en", "bn"].includes(body.language) ? body.language : l.language || s.language;
+      const d = { id: id(), ...makeLocalizedDraft(l, s, kind, lang), kind, language: lang };
       await put(e, "drafts", d.id, d);
       break;
     }
@@ -2019,6 +2858,362 @@ async function action(e, body) {
       await put(e, "invoices", inv.id, inv);
       return { id: inv.id };
     }
+    case "leadLanguage": {
+      const l = await get(e, "leads", String(body.id || ""));
+      if (!l) throw Error("Lead not found");
+      const lang = String(body.language || "");
+      if (!["", "en", "bn"].includes(lang)) throw Error("Invalid language");
+      l.language = lang;
+      await saveLead(e, l);
+      await log(e, "LANGUAGE", `Reply language for ${l.company} set to ${lang || "global default"}.`);
+      return { ok: true, language: lang };
+    }
+    case "translate": {
+      const text = String(body.text || "").slice(0, 4000);
+      const target = body.target === "bn" ? "bn" : "en";
+      if (!text) throw Error("Nothing to translate");
+      if (!e.GEMINI_API_KEY || !e.GEMINI_MODEL || e.AI_FREE_CONFIRMED !== "true")
+        throw Error("AI_NOT_CONNECTED");
+      const r = await externalFetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(e.GEMINI_MODEL)}:generateContent`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": e.GEMINI_API_KEY },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: `Translate the following into ${target === "bn" ? "Bangla" : "English"}. Keep the meaning, tone and any names or links exactly. Output only the translation.\n\n` + text }] }],
+            generationConfig: { maxOutputTokens: 1200 },
+          }),
+        },
+      );
+      if (!r.ok) throw Error("AI_HTTP_" + r.status);
+      const b = await r.json();
+      const out = b.candidates?.[0]?.content?.parts?.map((x) => x.text).join("").trim();
+      if (!out) throw Error("Translation returned nothing — the built-in templates are still available.");
+      await log(e, "LANGUAGE", `AI translation to ${target} used (owner-triggered).`);
+      return { ok: true, text: out, target };
+    }
+    case "bulkLeads": {
+      const ids = Array.isArray(body.ids) ? body.ids.slice(0, 300) : [];
+      const op = String(body.op || "");
+      const basis = String(body.basis || "").slice(0, 400);
+      if (!ids.length) throw Error("Select at least one prospect");
+      if (!["approve", "hold", "unreview", "suppress", "restore", "verify", "draft"].includes(op))
+        throw Error("Unknown bulk action");
+      if (op === "approve" && basis.length < 12)
+        throw Error("Record the contact basis you reviewed (at least a short sentence)");
+      const done = [];
+      const state = await settings(e);
+      for (const lid of ids) {
+        const l = await get(e, "leads", lid);
+        if (!l) continue;
+        if (op === "approve" || op === "hold" || op === "unreview") {
+          l.status = op === "approve" ? "APPROVED" : op === "hold" ? "HOLD" : "UNREVIEWED";
+          if (op === "approve") {
+            l.contactEvidence = basis || l.contactEvidence;
+            if (l.consent === "NONE") l.consent = "BUSINESS_REVIEWED";
+          }
+          if (op === "hold") {
+            l.consent = l.consent === "OPT_IN" ? l.consent : "NONE";
+          }
+        } else if (op === "suppress" || op === "restore") {
+          if (op === "restore") {
+            await unsuppressLead(e, l);
+            done.push({ id: l.id, suppressed: false });
+            continue;
+          }
+          l.suppressed = true;
+          if (l.email) {
+            await put(e, "suppression", await hash(String(l.email).toLowerCase()), {
+              email: String(l.email).toLowerCase(),
+              reason: "Owner suppressed this contact",
+              at: now(),
+            });
+          }
+          l.consent = "NONE";
+        } else if (op === "verify") {
+          if (!l.email) {
+            done.push({ id: l.id, skipped: "NO_EMAIL" });
+            continue;
+          }
+          l.emailStatus = await verifyLeadEmail(e, l, true);
+          done.push({ id: l.id, emailStatus: l.emailStatus });
+        } else if (op === "draft") {
+          if (l.status !== "APPROVED" || !l.email)
+            done.push({ id: l.id, skipped: "NOT_READY" });
+          else {
+            const existing = (await list(e, "drafts")).some(
+              (d) => d.leadId === l.id && d.kind === "outreach" && ["DRAFT", "APPROVED"].includes(d.status),
+            );
+            if (existing) done.push({ id: l.id, skipped: "DRAFT_EXISTS" });
+            else {
+              const lang = l.language || l.siteLanguage || state.language;
+              const made = {
+                id: id(),
+                ...makeLocalizedDraft(l, state, "outreach", lang),
+                kind: "outreach",
+                language: lang,
+                autoCandidate: true,
+              };
+              await put(e, "drafts", made.id, made);
+              done.push({ id: l.id, draftId: made.id });
+            }
+          }
+        }
+        await saveLead(e, l);
+      }
+      await log(
+        e,
+        "BULK",
+        `Bulk ${op} on ${ids.length} prospect(s)${basis ? " with a recorded basis" : ""}. A bulk action is still an owner decision.`,
+      );
+      return { ok: true, op, count: ids.length, results: done.slice(0, 200) };
+    }
+    case "bulkTasks": {
+      const ids = Array.isArray(body.ids) ? body.ids.slice(0, 300) : [];
+      const op = String(body.op || "");
+      if (!ids.length) throw Error("Select at least one task");
+      if (!["complete", "reopen"].includes(op)) throw Error("Unknown bulk task action");
+      let count = 0;
+      for (const tid of ids) {
+        const t = await get(e, "tasks", tid);
+        if (!t) continue;
+        t.status = op === "complete" ? "DONE" : "OPEN";
+        t.completedAt = op === "complete" ? now() : null;
+        await put(e, "tasks", t.id, t);
+        count++;
+      }
+      await log(
+        e,
+        "BULK",
+        `${count} task(s) ${op === "complete" ? "marked done" : "reopened"} in one action. Tasks never send or publish anything.`,
+      );
+      return { ok: true, op, count };
+    }
+    case "approveBulk": {
+      const ids = Array.isArray(body.ids) ? body.ids.slice(0, 200) : [];
+      if (!ids.length) throw Error("Select at least one draft");
+      const approved = [];
+      const skipped = [];
+      for (const did of ids) {
+        const d = await get(e, "drafts", did);
+        if (!d) {
+          skipped.push({ id: did, why: "GONE" });
+          continue;
+        }
+        if (!["DRAFT", "APPROVED"].includes(d.status)) {
+          skipped.push({ id: did, why: "NOT_A_DRAFT" });
+          continue;
+        }
+        const l = await get(e, "leads", d.leadId);
+        if (!l) {
+          skipped.push({ id: did, why: "NO_LEAD" });
+          continue;
+        }
+        const basis = String(l.contactEvidence || l.basis || "").trim();
+        if (basis.length < 12) {
+          skipped.push({ id: did, why: "NO_RECORDED_BASIS" });
+          continue;
+        }
+        if (l.suppressed) {
+          skipped.push({ id: did, why: "SUPPRESSED" });
+          continue;
+        }
+        d.status = "APPROVED";
+        d.approvedAt = now();
+        d.approvedBy = "OWNER_BULK";
+        d.basisSnapshot = basis.slice(0, 200);
+        await put(e, "drafts", d.id, d);
+        await log(
+          e,
+          "APPROVED",
+          `Owner bulk-approved the ${d.kind} message to ${l.company} (basis on record).`,
+        );
+        approved.push({ id: d.id, leadId: l.id });
+      }
+      await log(
+        e,
+        "BULK",
+        `Owner approved ${approved.length} message(s) in one action; ${skipped.length} skipped.`,
+      );
+      return { ok: true, approved: approved.length, results: approved, skipped };
+    }
+    case "verifyEmails": {
+      const r = await verifyEmails(e, { limit: Number(body.limit) || 40, force: !!body.force });
+      return { ok: true, ...r };
+    }
+    case "findEmails": {
+      const r = await findMissingEmails(e, { limit: Number(body.limit) || 8 });
+      return { ok: true, ...r };
+    }
+    case "bounces": {
+      const r = await bounceSweep(e);
+      return { ok: true, ...r, log: (await list(e, "bounces")).slice(0, 25) };
+    }
+    case "inboxLog": {
+      const log = (await list(e, "inboxlog")).sort((a, b) => (b.at > a.at ? 1 : -1)).slice(0, 60);
+      const known = knownUrgentWords(await settings(e));
+      return {
+        ok: true,
+        log,
+        classes: log.reduce((acc, x) => {
+          acc[x.class || "NORMAL"] = (acc[x.class || "NORMAL"] || 0) + 1;
+          return acc;
+        }, {}),
+        gaps: phraseGaps(log.filter((x) => x.class === "NORMAL"), known),
+        labels: EMAIL_STATUS_LABEL,
+      };
+    }
+    case "testNotify": {
+      const conf = await settings(e);
+      const lines = [
+        "\u{2705} Prospect Studio test alert",
+        "Every alert carries its reason. This one is a test you asked for.",
+        `Auto-approve: ${conf.autoApprove === false ? "OFF" : "ON"} · auto-send: ${conf.autoSendOptIn === false ? "OFF" : "ON"}`,
+        `Watching: ${(await list(e, "mail")).length} message(s) · ${(await list(e, "leads")).length} prospect(s)`,
+      ];
+      const r = await notify(e, "errors", lines.join("\n"), conf);
+      return { ok: true, sent: !!r.ok, skipped: r.skipped || null, why: r.why || null, text: lines.join("\n") };
+    }
+    case "notifyPreview": {
+      const conf = await settings(e);
+      return {
+        ok: true,
+        master: conf.notifyAll !== false,
+        keys: NOTIFY_KEY_META.map((k) => ({ ...k, on: conf[k.key] !== false })),
+        example: [
+          "\u{1F534} Someone asked to be contacted now",
+          "Business: Aroma Coffee House · Dhaka, Bangladesh",
+          "They wrote: “Please call now — we want to sign this week.”",
+          "Why this fired: matched “call now”, “this week” in the reply body",
+          "Not done automatically: nothing. You decide the next step.",
+        ].join("\n"),
+      };
+    }
+    case "emailStatuses": {
+      const leads = await list(e, "leads");
+      const counts = {};
+      for (const l of leads) {
+        const k = l.email ? l.emailStatus || "SYNTAX_OK" : "NO_EMAIL";
+        counts[k] = (counts[k] || 0) + 1;
+      }
+      return { ok: true, counts, labels: EMAIL_STATUS_LABEL };
+    }
+    case "whatMoves": {
+      return {
+        ok: true,
+        automatic: [
+          "stage CONTACTED — the moment a message is accepted by Gmail",
+          "stage REPLIED — when a reply to your own thread is matched",
+          "stage CONVERSATION — when you have both written in the thread",
+          "draft approved — only when every safety check already passed and auto-approve is on",
+          "lead bounced/suppressed — from the mail provider's own delivery notices",
+          "follow-up task and revisit date — created at the moment of the send",
+        ],
+        manual: [
+          "stage PROPOSAL — only you know a quote went out",
+          "stage NURTURE, WON, LOST — decisions, not observations",
+          "suppression — a NEGATIVE reply only raises an alert; nothing is suppressed for you",
+          "contact basis and approval — your review, recorded by hand or in bulk",
+          "invoice paid, WhatsApp or phone outcomes — record them yourself",
+        ],
+      };
+    }
+    case "urgentCheck": {
+      if (demo(e)) return { ok: true, simulated: true, flagged: 0 };
+      const r = await urgentWatch(e);
+      await log(e, "URGENT", `Urgent check ran manually. ${r.flagged || 0} flagged${r.skipped ? " · " + r.skipped : ""}.`);
+      return { ok: true, ...r };
+    }
+    case "urgent": {
+      const items = (await list(e, "urgent")).sort((a, b) => (b.at > a.at ? 1 : -1)).slice(0, 50);
+      return { ok: true, urgent: items, unhandled: items.filter((x) => !x.handled && x.tier !== "NORMAL").length };
+    }
+    case "urgentHandled": {
+      const it = await get(e, "urgent", String(body.id || ""));
+      if (!it) throw Error("Urgent item not found");
+      it.handled = true;
+      it.handledAt = now();
+      await put(e, "urgent", it.id, it);
+      if (it.leadId) {
+        const lead = await get(e, "leads", it.leadId);
+        if (lead) {
+          lead.urgentAt = null;
+          lead.notes = (lead.notes ? lead.notes + "\n" : "") + "Urgent reply handled " + day() + ".";
+          await saveLead(e, lead);
+        }
+      }
+      await put(e, "tasks", "urgent-" + it.id, { ...(await get(e, "tasks", "urgent-" + it.id) || { id: "urgent-" + it.id, title: "Urgent reply", type: "FOLLOW_UP" }), status: "DONE" });
+      await log(e, "URGENT", "Urgent item marked handled: " + (it.subject || it.id) + " (human decision).");
+      return { ok: true };
+    }
+    case "launchPlan": {
+      const answers = body.answers || {};
+      const items = launchPlan(answers);
+      for (const it of items)
+        await put(e, "tasks", it.id, { ...it, planId: "launch-" + day(), createdAt: now() });
+      await put(e, "plans", "launch-" + day(), { id: "launch-" + day(), at: now(), answers, count: items.length });
+      await log(e, "PLAN", `30-day launch plan created: ${items.length} tasks (owner answers, human-reviewed).`);
+      return { ok: true, plan: items };
+    }
+    case "playbook": {
+      return { ok: true, playbook: PLAYBOOK, contentStarters: CONTENT_STARTERS, language: (await settings(e)).language };
+    }
+    case "playbookToTasks": {
+      const ids = Array.isArray(body.ids) ? body.ids : [];
+      const lang = (await settings(e)).language;
+      let made = 0;
+      for (const pid of ids) {
+        const p = PLAYBOOK.find((x) => x.id === pid);
+        if (!p) continue;
+        await put(e, "tasks", "play-" + pid + "-" + day(), {
+          id: "play-" + pid + "-" + day(),
+          title: String(lang === "bn" ? p.bn : p.en).slice(0, 180),
+          type: "MARKETING",
+          due: day(),
+          status: "OPEN",
+          createdAt: now(),
+        });
+        made++;
+      }
+      await log(e, "PLAYBOOK", `${made} first-customer step(s) added as tasks.`);
+      return { ok: true, added: made };
+    }
+    case "startersToContent": {
+      const ids = Array.isArray(body.ids) ? body.ids : [];
+      const lang = (await settings(e)).language;
+      let made = 0;
+      for (const cid of ids) {
+        const c = CONTENT_STARTERS.find((x) => x.id === cid);
+        if (!c) continue;
+        const text = lang === "bn" ? c.bn : c.en;
+        await put(e, "content", "starter-" + cid + "-" + day(), {
+          id: "starter-" + cid + "-" + day(),
+          date: day(),
+          channel: "Blog",
+          topic: text,
+          body: text + "\n\n(Draft from your content starter list. Finish it in your own words, then mark it posted.)",
+          status: "DRAFT",
+          language: lang,
+          createdAt: now(),
+        });
+        made++;
+      }
+      await log(e, "CONTENT", `${made} content starter(s) added as drafts.`);
+      return { ok: true, added: made };
+    }
+    case "health": {
+      const items = healthCheck({
+        leads: await list(e, "leads"),
+        invoices: await list(e, "invoices"),
+        tasks: await list(e, "tasks"),
+        content: await list(e, "content"),
+        day: day(),
+      });
+      const stored = await get(e, "health", day());
+      if (!stored) await put(e, "health", day(), { id: day(), at: now(), items });
+      const last = (await list(e, "health")).sort((a, b) => (b.id > a.id ? 1 : -1))[0] || null;
+      return { ok: true, items, last, goals: (await goalPace({ settings: await settings(e), leads: await list(e, "leads"), invoices: await list(e, "invoices"), dayISO: day() })) };
+    }
     case "digest":
       return { ok: true, digest: await buildDigest(e) };
     default:
@@ -2199,6 +3394,30 @@ async function handle(r, e) {
   )
     return oauth(r, e, u);
   if (!u.pathname.startsWith("/api/")) return e.ASSETS.fetch(r);
+  /* Public and deliberately harmless: what version is actually deployed here, and
+   * which v0.8 features answered. Nothing private, no counts, no data. */
+  if (u.pathname === "/api/version")
+    return json({
+      app: "Prospect Studio",
+      version: APP_VERSION,
+      features: [
+        "auto-approve-default-on",
+        "auto-send-default-on",
+        "bulk-review-with-basis",
+        "select-all-and-sort",
+        "mx-address-check",
+        "public-page-email-extraction",
+        "global-markets",
+        "grounded-drafts",
+        "per-case-alerts",
+        "reply-classification",
+        "inbox-weekly-skim",
+        "revisit-date-at-send",
+        "bounce-sweep",
+        "directory-name-cleanup",
+      ],
+      markets: { countries: marketSummary.countries, cities: marketSummary.cities },
+    });
   if (!(await authenticated(r, e)))
     return json({ error: "OWNER_SIGN_IN_REQUIRED" }, 401);
   if (u.pathname === "/api/state") return json(await state(e));
@@ -2367,6 +3586,28 @@ export default {
   },
   async scheduled(event, e, ctx) {
     if (demo(e)) return;
+    if (event.cron === "* * * * *") {
+      ctx.waitUntil(
+        (async () => {
+          let ticket;
+          try {
+            ticket = await lease(e);
+          } catch {
+            return;
+          }
+          try {
+            const s = await settings(e);
+            if (s.paused) return;
+            await urgentWatch(e);
+          } catch (err) {
+            await log(e, "URGENT_ERROR", safeError(err));
+          } finally {
+            await release(e, ticket);
+          }
+        })(),
+      );
+      return;
+    }
     ctx.waitUntil(
       (async () => {
         let ticket;
@@ -2383,6 +3624,8 @@ export default {
             () => sendOne(e),
             () => followupDrafts(e),
             () => invoiceReminders(e),
+            () => verifyEmails(e, { limit: 15 }),
+            () => findMissingEmails(e, { limit: 4 }),
           ]) {
             try {
               await task();
@@ -2417,6 +3660,15 @@ export default {
                   "CONTENT",
                   "Automatic daily content drafts created (review before posting).",
                 );
+                await notify(
+                  e,
+                  "content",
+                  `\u{1F4DD} ${items.length} content draft(s) written today\n${items
+                    .slice(0, 3)
+                    .map((x) => "• " + String(x.topic || x.channel).slice(0, 80))
+                    .join("\n")}\n\nReview: ${e.APP_ORIGIN}/#marketing`,
+                  s,
+                ).catch(() => {});
               } catch (err) {
                 await log(e, "CONTENT_ERROR", safeError(err));
               }
@@ -2448,6 +3700,19 @@ export default {
             }).format(new Date()),
           );
           if (hour < 1) {
+            const openTasks = (await list(e, "tasks")).filter(
+              (t) => t.status === "OPEN" && t.due && t.due <= day(),
+            );
+            if (openTasks.length)
+              await notify(
+                e,
+                "tasks",
+                `\u{1F4CB} ${openTasks.length} task(s) due or overdue today\n${openTasks
+                  .slice(0, 5)
+                  .map((t) => "• " + t.title)
+                  .join("\n")}\n\n${e.APP_ORIGIN}/#tasks`,
+                s,
+              ).catch(() => {});
             await report(e, true);
             const ai = await get(e, "runtime", "ai");
             if (

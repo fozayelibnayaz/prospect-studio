@@ -9,9 +9,25 @@ This replaces daily spreadsheet operations with a web app. **It is not already d
 - The fixed `Autopilot.gs` status function now logs results even without a spreadsheet UI. That is independent of this new web app.
 - The new app uses the **same Tavily account/key**, not a new plan. It supports KEYED mode only. There is no new `AP_SEARCH_MODE` property to maintain in Google.
 
+## 0b. What changed in v0.8 (upgrading from v0.5/v0.7 — no new setup)
+
+- **No new secrets, no new service, no new card.** The address check uses Cloudflare's own
+  DNS-over-HTTPS resolver; the extraction pass reads public pages directly.
+- **No database migration.** A fresh `migrations/0001.sql` is all the new record types
+  (`inboxlog`, `bounces`, `runtime`) need, because they reuse the existing `objects` table.
+- **Two cron triggers, unchanged** (`*/15 * * * *` and `* * * * *`). Keep your own
+  `wrangler.jsonc`; keep editing only `env.production`.
+- **Default behaviour changed on purpose:** auto-approval and auto-sending ship **ON**. If you want
+  the old review-every-message behaviour, turn them off in **Automation → Automatic approval &
+  sending** (the switch is on Overview, Review and Settings too). Turning them off is instant.
+- **Alerts:** all per-case Telegram switches ship ON. If the message volume is too high, turn
+  individual cases off in **Automation → Telegram alerts**, or use the master switch to keep only
+  urgent replies and errors.
+- After deploying, press **Send a test alert to Telegram** once to confirm delivery works.
+
 ## 1. Put the source at the new repository root
 
-Unzip `prospect-studio-v0.1.0-source.zip` into a new empty folder/repository. Open Terminal in that folder:
+Unzip `prospect-studio-v0.8.0-source.zip` into a new empty folder/repository. Open Terminal in that folder:
 
 ```bash
 npm ci
